@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10263a">
+  <title>M08 分选工位</title>
+  <link rel="stylesheet" href="/src/styles.css">
+  <script type="module" src="/src/main.mjs"></script>
+</head>
+<body>
+  <a class="skip" href="#content">跳到主要内容</a>
+  <aside class="sidebar">
+    <div class="identity"><span class="mark" aria-hidden="true">M8</span><div><strong>分选工位</strong><small>M08 · 模拟运行</small></div></div>
+    <nav id="navigation" aria-label="工位功能">
+      <a href="#workbench">工作台</a>
+      <a href="#tasks">任务与箱位</a>
+      <a href="#diagnostics">设备诊断</a>
+      <a href="#configuration">配置管理</a>
+      <a href="#evidence">批次证据</a>
+    </nav>
+    <label class="profile">模拟角色
+      <select id="profile">
+        <option value="operator">操作员</option><option value="reviewer">审批人员</option>
+        <option value="engineer">发布人员</option><option value="auditor">计量审计</option>
+        <option value="viewer">只读观察</option>
+      </select>
+    </label>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span id="scope">等待工位数据</span><span id="connection" class="pill alert" role="status">连接中</span></header>
+    <main id="content" tabindex="-1">
+      <div id="notice" role="status" hidden></div>
+      <div id="screen"><p class="empty">正在读取完整快照…</p></div>
+    </main>
+  </div>
+</body>
+</html>

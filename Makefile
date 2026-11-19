@@ -36,7 +36,7 @@ M06_TEST := $(BUILD_DIR)/m06_scheduling_test
 M07_TEST := $(BUILD_DIR)/m07_execution_test
 
 .PHONY: test
-test: $(M01_TEST) $(M02_TEST) $(M03_TEST) $(M04_TEST) $(M05_TEST) $(M06_TEST) $(M07_TEST)
+test: $(M01_TEST) $(M02_TEST) $(M03_TEST) $(M04_TEST) $(M05_TEST) $(M06_TEST) $(M07_TEST) m08-test
 	$(M01_TEST)
 	$(M02_TEST)
 	$(M03_TEST)
@@ -79,3 +79,26 @@ $(M07_TEST): $(M01_HEADERS) $(M02_HEADERS) $(M03_HEADERS) $(M04_HEADERS) $(M05_S
 	mkdir -p $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc \
 		$(M05_SOURCES) $(M06_SOURCES) $(M07_SOURCES) $(M07_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+M08_SOURCES := $(wildcard src/m08_hmi/*.cpp)
+M08_HEADERS := $(wildcard src/m08_hmi/*.h)
+M08_TEST_SOURCES := $(wildcard tests/m08_hmi/*.cpp)
+M08_TEST_HEADERS := $(wildcard tests/m08_hmi/*.h)
+M08_TEST := $(BUILD_DIR)/m08_hmi_test
+M08_DEMO := $(BUILD_DIR)/m08_hmi_demo
+
+.PHONY: m08-test m08-demo
+m08-test: $(M08_TEST)
+	$(M08_TEST)
+
+m08-demo: $(M08_DEMO)
+
+$(M08_TEST): $(M08_SOURCES) $(M08_HEADERS) $(M08_TEST_SOURCES) $(M08_TEST_HEADERS)
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc \
+		$(M08_SOURCES) $(M08_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(M08_DEMO): $(M08_SOURCES) $(M08_HEADERS) $(M08_TEST_HEADERS) web/m08_hmi/demo_bridge.cpp
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc -Itests/m08_hmi \
+		$(M08_SOURCES) web/m08_hmi/demo_bridge.cpp $(LDFLAGS) $(LDLIBS) -o $@
