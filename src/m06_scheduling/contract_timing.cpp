@@ -36,7 +36,7 @@ std::optional<Deadlines> contract_deadlines(Contract contract, const Budget& b,
     }
     return Deadlines{contract == Contract::A ? Receipt::CommitT7 : Receipt::FinalGoalT4,
                      receive, handoff, b.receipt_to_contact_min, b.receipt_to_contact_max,
-                     b.early_margin, b.late_margin};
+                     b.early_margin, b.late_margin, b.handoff_to_receipt_min, b.handoff_to_receipt_max};
 }
 
 Reason validate_plan(const Task& task, const PlanEnvelope& plan, Tick now,

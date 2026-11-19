@@ -51,6 +51,7 @@ struct Deadlines {
     Window receive;
     Window handoff;
     Tick receive_to_contact_min{}, receive_to_contact_max{}, early_margin{}, late_margin{};
+    Tick handoff_to_receipt_min{}, handoff_to_receipt_max{};
 };
 
 enum class ResourceKind { Robot, Tool, Bin, E11 };
