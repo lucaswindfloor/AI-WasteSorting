@@ -19,19 +19,25 @@ M05_SOURCES := $(wildcard src/m05_eligibility/*.cpp)
 M05_HEADERS := $(wildcard src/m05_eligibility/*.h)
 M05_TEST_SOURCES := $(wildcard tests/m05_eligibility/*.cpp)
 M05_TEST_HEADERS := $(wildcard tests/m05_eligibility/*.h)
+M06_SOURCES := $(wildcard src/m06_scheduling/*.cpp)
+M06_HEADERS := $(wildcard src/m06_scheduling/*.h)
+M06_TEST_SOURCES := $(wildcard tests/m06_scheduling/*.cpp)
+M06_TEST_HEADERS := $(wildcard tests/m06_scheduling/*.h)
 M01_TEST := $(BUILD_DIR)/m01_acquisition_test
 M02_TEST := $(BUILD_DIR)/m02_calibration_test
 M03_TEST := $(BUILD_DIR)/m03_inference_test
 M04_TEST := $(BUILD_DIR)/m04_tracking_test
 M05_TEST := $(BUILD_DIR)/m05_eligibility_test
+M06_TEST := $(BUILD_DIR)/m06_scheduling_test
 
 .PHONY: test
-test: $(M01_TEST) $(M02_TEST) $(M03_TEST) $(M04_TEST) $(M05_TEST)
+test: $(M01_TEST) $(M02_TEST) $(M03_TEST) $(M04_TEST) $(M05_TEST) $(M06_TEST)
 	$(M01_TEST)
 	$(M02_TEST)
 	$(M03_TEST)
 	$(M04_TEST)
 	$(M05_TEST)
+	$(M06_TEST)
 
 $(M01_TEST): $(M01_SOURCES) $(M01_HEADERS) tests/m01_acquisition/acquisition_test.cpp
 	mkdir -p $(BUILD_DIR)
@@ -57,3 +63,8 @@ $(M05_TEST): $(M01_HEADERS) $(M02_HEADERS) $(M03_HEADERS) $(M04_SOURCES) $(M04_H
 	mkdir -p $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc \
 		$(M04_SOURCES) $(M05_SOURCES) $(M05_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(M06_TEST): $(M01_HEADERS) $(M02_HEADERS) $(M03_HEADERS) $(M04_HEADERS) $(M05_SOURCES) $(M05_HEADERS) $(M06_SOURCES) $(M06_HEADERS) $(M06_TEST_SOURCES) $(M06_TEST_HEADERS) $(M02_TEST_HEADERS) $(M03_TEST_HEADERS) $(M04_TEST_HEADERS) $(M05_TEST_HEADERS)
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc \
+		$(M05_SOURCES) $(M06_SOURCES) $(M06_TEST_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
