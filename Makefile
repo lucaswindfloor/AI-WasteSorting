@@ -36,7 +36,7 @@ M06_TEST := $(BUILD_DIR)/m06_scheduling_test
 M07_TEST := $(BUILD_DIR)/m07_execution_test
 
 .PHONY: test
-test: $(M01_TEST) $(M02_TEST) $(M03_TEST) $(M04_TEST) $(M05_TEST) $(M06_TEST) $(M07_TEST) m08-test
+test: $(M01_TEST) $(M02_TEST) $(M03_TEST) $(M04_TEST) $(M05_TEST) $(M06_TEST) $(M07_TEST) m08-test m09-test
 	$(M01_TEST)
 	$(M02_TEST)
 	$(M03_TEST)
@@ -102,3 +102,22 @@ $(M08_DEMO): $(M08_SOURCES) $(M08_HEADERS) $(M08_TEST_HEADERS) web/m08_hmi/demo_
 	mkdir -p $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc -Itests/m08_hmi \
 		$(M08_SOURCES) web/m08_hmi/demo_bridge.cpp $(LDFLAGS) $(LDLIBS) -o $@
+
+M09_SOURCES := $(wildcard src/m09_archive/*.cpp src/m09_archive/*/*.cpp)
+M09_TEST_SOURCES := $(wildcard tests/m09_archive/*.cpp)
+M09_TEST := $(BUILD_DIR)/m09_archive_test
+M09_TEST_INPUTS := $(M09_SOURCES) $(M09_TEST_SOURCES) $(M05_SOURCES) $(M06_SOURCES) $(M07_SOURCES) $(M08_SOURCES)
+M09_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/m09-obj/%.o,$(M09_TEST_INPUTS))
+
+.PHONY: m09-test
+m09-test: $(M09_TEST)
+	$(M09_TEST)
+
+$(M09_TEST): $(M09_OBJECTS)
+	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -lcrypto -o $@
+
+$(BUILD_DIR)/m09-obj/%.o: %.cpp
+	mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc -Itests -MMD -MP -c $< -o $@
+
+-include $(M09_OBJECTS:.o=.d)
