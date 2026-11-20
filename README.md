@@ -28,6 +28,12 @@ make test
 | `adapters/*_source.cpp` | 同步、RGB、HSI 和 E05 规范化输入的校验 |
 | `tests/m01_acquisition/acquisition_test.cpp` | 使用模拟输入检查关键采集行为 |
 
+## M01 传送带采集仿真
+
+在 Linux 或 WSL2 上用 `make -j4 m01-sim` 构建，再用 `build/m01_sim --scenario mixed` 运行。模拟设备通过原有 M01 入口交付 RGB、HSI 和深度数据，M09 保存并校验归档。使用 Node.js 22 或更新版本启动 `node web/m01_sim/server.mjs` 后，可在 `http://127.0.0.1:8081` 回放传送带、采集图像和触发账本。
+
+[构建、运行和场景验收说明](sim/m01/README.md)
+
 ## M02 接入契约
 
 - 先用 `CalibrationService::install` 注册 M08 已核验的参数快照，再用 `process` 处理 M01 的采集段。快照按运行和配置世代选择，并严格核对设备身份、会话、固件、SDK、格式和编码器世代。调用方串行安排安装、退役和处理。排队中的旧段继续使用原快照，直到退役。回退使用新配置世代关联旧参数。M09 应保留完整快照和处理时用到的同步及环境证据，以便在新实例回放。

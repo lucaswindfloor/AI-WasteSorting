@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c1524">
+  <title>M01 传送带采集仿真</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.mjs" type="module"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="mark" aria-hidden="true">M01</span><div><h1>传送带采集仿真</h1><p>RGB · HSI · 深度 · M09 归档</p></div></div>
+    <p class="tag" id="run-status" role="status">待运行</p>
+  </header>
+  <main>
+    <form id="controls" class="controls panel">
+      <label>场景<select name="scenario">
+        <option value="mixed">高光谱漏行与晚到</option><option value="normal">正常采集</option>
+        <option value="missing">高光谱漏行</option><option value="late">高光谱晚到</option>
+        <option value="slow-archive">归档变慢</option><option value="reconnect">设备重连</option>
+      </select></label>
+      <label>带速<select name="speed"><option value="500">0.5 m/s</option><option value="1000" selected>1.0 m/s</option><option value="2000">2.0 m/s</option><option value="3000">3.0 m/s</option></select></label>
+      <label>深度采样<select name="depth"><option value="independent">独立采样</option><option value="encoder">每 8 次编码器触发</option></select></label>
+      <label>模拟规格<select name="profile"><option value="demo">标准演示</option><option value="wide">较宽行与更多波段</option></select></label>
+      <label>每包最多行数<select name="packetLines"><option value="1">1 行</option><option value="2" selected>2 行</option><option value="4">4 行</option><option value="8">8 行</option></select></label>
+      <button type="submit" class="primary" id="run">运行仿真</button>
+    </form>
+    <p id="message" class="notice" role="alert" hidden></p>
+
+    <div class="station">
+      <section class="panel conveyor">
+        <div class="head"><div><h2>传送带与扫描线</h2><p id="geometry">每 1.5 mm 发出一次共同触发</p></div><span id="current-pulse" class="mono info">触发 —</span></div>
+        <canvas id="belt" width="1000" height="380" aria-label="传送带顶视图，显示物料、编码器位置和扫描线" role="img"></canvas>
+        <div class="transport">
+          <button type="button" id="play" disabled>播放</button><button type="button" id="step" disabled>下一事件</button>
+          <input id="seek" aria-label="回放时间" type="range" min="0" max="1" step="0.001" value="0" disabled>
+          <output class="mono" id="time">0.0 ms</output>
+        </div>
+        <dl class="meters"><div><dt>编码器计数</dt><dd id="count">—</dd></div><div><dt>当前位移</dt><dd id="distance">0 mm</dd></div>
+          <div><dt>到达封包</dt><dd id="packets">0</dd></div><div><dt>M01 缓冲</dt><dd id="buffer">0 B</dd></div>
+          <div><dt>归档队列</dt><dd id="queue">0</dd></div></dl>
+      </section>
+
+      <section class="panel ledger">
+        <div class="head"><div><h2>触发账本</h2><p>使用 M01 的实际配对结果</p></div><button id="first-gap" type="button" disabled>首条缺口</button></div>
+        <form class="lookup" id="lookup"><label>触发号 <input id="trigger-input" type="number" min="1" max="240" required value="87" disabled></label>
+          <button type="submit" id="jump" disabled>定位结果</button>
+          <button type="button" id="exposure" disabled>触发瞬间</button></form>
+        <div class="table-scroll">
+          <table><thead><tr><th scope="col">触发</th><th scope="col">RGB</th><th scope="col">HSI</th><th scope="col">归档</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="4">等待运行</td></tr></tbody></table>
+        </div>
+        <div id="detail" class="detail">选择触发号查看源帧行和收件时刻。</div>
+        <p id="diagnostic" class="diagnostic" hidden></p>
+      </section>
+    </div>
+
+    <section class="previews" aria-label="M01 实收的预览">
+      <article class="panel sensor"><div class="head"><div><h2>RGB 线扫</h2><p>实收 RGB 行</p></div><span class="label rgb">R01</span></div>
+        <canvas id="rgb" width="240" height="126" role="img" aria-label="M01 实收 RGB 扫描行拼图"></canvas></article>
+      <article class="panel sensor"><div class="head"><div><h2>高光谱线扫</h2><p id="band">选定波段 · 伪彩</p></div><span class="label hsi">H01</span></div>
+        <canvas id="hsi" width="240" height="126" role="img" aria-label="M01 实收高光谱选定波段，琥珀色表示缺行"></canvas></article>
+      <article class="panel sensor"><div class="head"><div><h2>深度观测</h2><p>含有效零高和掩膜缺测</p></div><span class="label depth">E05</span></div>
+        <canvas id="depth" width="240" height="126" role="img" aria-label="M01 实收深度图，琥珀色表示无效点"></canvas></article>
+    </section>
+
+    <section class="panel outcome">
+      <div class="head"><div><h2>校验结果</h2><p id="summary">运行后显示 M01 与 M09 的交叉核对结果。</p></div>
+        <div class="downloads"><a id="csv" hidden>下载账本 CSV</a><a id="json" hidden>下载事件 JSON</a></div></div>
+      <dl class="meters"><div><dt>完整配对</dt><dd id="pairs">—</dd></div><div><dt>HSI 缺口</dt><dd id="gaps">—</dd></div>
+        <div><dt>晚到证据</dt><dd id="late">—</dd></div><div><dt>E05 观测</dt><dd id="depth-total">—</dd></div>
+        <div><dt>M09 校验块</dt><dd id="verified">—</dd></div></dl>
+    </section>
+  </main>
+</body>
+</html>

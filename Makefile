@@ -121,3 +121,28 @@ $(BUILD_DIR)/m09-obj/%.o: %.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc -Itests -MMD -MP -c $< -o $@
 
 -include $(M09_OBJECTS:.o=.d)
+
+M01_SIM := $(BUILD_DIR)/m01_sim
+M01_SIM_SOURCES := $(wildcard sim/m01/*.cpp) $(M01_SOURCES)
+M01_SIM_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/m01-sim-obj/%.o,$(M01_SIM_SOURCES))
+M01_SIM_ARCHIVE := $(addprefix $(BUILD_DIR)/m09-obj/src/m09_archive/,archive_service.o \
+	adapters/m01_capture_adapter.o evidence/evidence_index.o storage/archive_recovery.o \
+	storage/local_files.o storage/manifest_store.o storage/record_codec.o storage/segment_store.o storage/storage_pressure.o)
+
+.PHONY: m01-test m01-sim m01-sim-test
+m01-test: $(M01_TEST)
+	$(M01_TEST)
+
+m01-sim: $(M01_SIM)
+
+m01-sim-test: $(M01_SIM)
+	python3 tests/m01_sim/scenarios.py "$(M01_SIM)"
+
+$(M01_SIM): $(M01_SIM_OBJECTS) $(M01_SIM_ARCHIVE)
+	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -lcrypto -o $@
+
+$(BUILD_DIR)/m01-sim-obj/%.o: %.cpp
+	mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++20 -Isrc -MMD -MP -c $< -o $@
+
+-include $(M01_SIM_OBJECTS:.o=.d) $(M01_SIM_ARCHIVE:.o=.d)
