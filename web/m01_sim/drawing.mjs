@@ -69,7 +69,23 @@ function drawMaterial(ctx, item, offset, x, y) {
     y(item.y - item.width / 2) - 11, '#dae9f6', 13);
 }
 
-export function drawBelt(canvas, meta, now, pulse, packet, diagnostic) {
+function drawCandidates(ctx, evidence, x, y, offset, prefix = '') {
+  for (const candidate of evidence) {
+    if (!candidate.bounds) continue;
+    const [x0, y0, x1, y1] = candidate.bounds;
+    const label = candidate.label === 'object' ? '轮廓' : candidate.label === 'AL' ? 'Al' : candidate.label;
+    const left = Math.min(x(x0 + offset), x(x1 + offset)) - 3;
+    const top = y(y0) - 3;
+    const color = candidate.label === 'AL' ? '#ffe499' : '#9ef0ad';
+    ctx.lineWidth = 2;
+    box(ctx, left, top, Math.abs(x(x1 + offset) - x(x0 + offset)) + 6, y(y1) - y(y0) + 6,
+      2, null, color);
+    ctx.lineWidth = 1;
+    text(ctx, prefix + label, left, top - 4, color, 16);
+  }
+}
+
+export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence = []) {
   const ctx = canvas.getContext('2d');
   const shift = distanceAt(meta, now);
   const scanX = meta?.scanX ?? 142;
@@ -98,6 +114,7 @@ export function drawBelt(canvas, meta, now, pulse, packet, diagnostic) {
   line(ctx, 55, y(120), 946, y(120), '#4c637a');
   ctx.setLineDash([]);
   for (const item of meta?.objects ?? []) drawMaterial(ctx, item, shift, x, y);
+  drawCandidates(ctx, evidence, x, y, shift, 'M03 ');
   if (pulseActive || faultActive) box(ctx, scanner - 10, 101, 20, 194, 0, faultActive ? '#f7ad6230' : '#4fe4f536');
   ctx.setLineDash([8, 5]);
   line(ctx, scanner, 103, scanner, 293, scanColor, pulseActive ? 4 : 2);
@@ -216,5 +233,51 @@ export function drawAlignedPreview(canvas, samples, sensor, meta, outline) {
   text(ctx, '皮带方向 →', canvas.width / 2, y(beltWidth) + 17, colors.ink, 12);
   ctx.textAlign = 'right';
   text(ctx, `${scanX} mm`, x(scanX), y(beltWidth) + 17, colors.ink, 12);
+  ctx.textAlign = 'left';
+}
+
+export function drawInferenceWindow(canvas, rows, meta, window) {
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0b1523';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!meta || !window || !rows.length) {
+    text(ctx, '等待窗口结果', 20, 36, colors.dim, 19);
+    return;
+  }
+  const sensor = window.model.package === 'sim-hsi' ? 'hsi' : 'rgb';
+  const coordinates = rows.map((row) => sensor === 'hsi'
+    ? meta.hsiScanX - row.hsiDisplacementMm
+    : meta.scanX - row.displacementMm);
+  const { pitch, beltWidth, previewWidth } = meta;
+  const min = Math.min(...coordinates) - 3 * pitch;
+  const max = Math.max(...coordinates) + 3 * pitch;
+  const left = 57, top = 28, width = canvas.width - left - 21, height = canvas.height - top - 50;
+  const x = (mm) => left + (mm - min) / (max - min) * width;
+  const y = (mm) => top + mm / beltWidth * height;
+  box(ctx, left, top, width, height, 0, '#17273b');
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, top, width, height);
+  ctx.clip();
+  for (const [i, row] of rows.entries()) {
+    const center = coordinates[i];
+    const start = Math.round(x(center - pitch / 2));
+    const end = Math.round(x(center + pitch / 2));
+    for (let col = 0; col < previewWidth; col++) {
+      const upper = y(col / previewWidth * beltWidth);
+      const lower = y((col + 1) / previewWidth * beltWidth);
+      ctx.fillStyle = `rgb(${previewColor(row[sensor + 'Pixels'], sensor, col).join(',')})`;
+      ctx.fillRect(start, Math.floor(upper), end - start, Math.ceil(lower) - Math.floor(upper));
+    }
+  }
+  drawCandidates(ctx, window.evidence, x, y, 0);
+  ctx.restore();
+  for (const mm of [0, beltWidth / 2, beltWidth]) text(ctx, String(mm), 11, y(mm) + 5, colors.ink, 15);
+  text(ctx, 'Y mm', 10, 18, colors.ink, 15);
+  text(ctx, min.toFixed(1), left, y(beltWidth) + 24, colors.ink, 15);
+  ctx.textAlign = 'center';
+  text(ctx, '沿带 X（mm）', left + width / 2, y(beltWidth) + 24, colors.ink, 15);
+  ctx.textAlign = 'right';
+  text(ctx, max.toFixed(1), left + width, y(beltWidth) + 24, colors.ink, 15);
   ctx.textAlign = 'left';
 }

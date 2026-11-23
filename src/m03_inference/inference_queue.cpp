@@ -107,7 +107,7 @@ void InferenceQueue::poll(Tick now, Report& report) {
                     finish(work.result, State::Expired, "expired_before_delivery", now, report);
                 } else {
                     const auto state = evidence.empty() ? State::NoDetection : State::Completed;
-                    finish(work.result, state, evidence.empty() ? "no_valid_candidates" : "", now, report,
+                    finish(work.result, state, state == State::NoDetection ? "no_valid_candidates" : "", now, report,
                            std::move(evidence));
                 }
             }

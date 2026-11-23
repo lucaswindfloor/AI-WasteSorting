@@ -1,5 +1,6 @@
 #include "simulator.h"
 #include "calibration.h"
+#include "inference.h"
 
 #include "m01_acquisition/acquisition_service.h"
 #include "m09_archive/adapters/m01_capture_adapter.h"
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -69,6 +71,7 @@ std::string integers(const auto& values) {
 
 double ms(Tick t) { return std::chrono::duration<double, std::milli>(t).count(); }
 std::string time(Tick t) { return std::to_string(ms(t)); }
+std::string time(const std::optional<Tick>& t) { return t ? time(*t) : "null"; }
 const char* yes(bool value) { return value ? "true" : "false"; }
 
 std::string_view source_name(Source source) {
@@ -112,6 +115,18 @@ struct Session {
     Tick start;
     m01::Config config;
 };
+
+m03::QueueLimits inference_limits(const Options& opts) {
+    if (opts.scenario == Scenario::InferenceOverload) return {2, 1, 32 * 1024 * 1024};
+    const auto runners = opts.scenario == Scenario::ModelSwitch ? 4u : opts.inference == InferenceMode::Split ? 2u : 1u;
+    return {8, runners, 32 * 1024 * 1024};
+}
+
+std::string describe_model(const m03::ModelIdentity& identity) {
+    return object({{"package", quote(identity.key.package)}, {"version", quote(identity.key.version)},
+        {"digest", quote(identity.artifact_digest)}, {"backend", quote(identity.backend)},
+        {"precision", quote(identity.precision)}, {"processing", quote(identity.processing_version)}});
+}
 
 enum class Input { Encoder, Sync, Rgb, Hsi, Depth, Advance };
 
@@ -283,7 +298,10 @@ SpectralSample spectral_sample(const m02::AlignedObservation& row, unsigned widt
 class Simulation {
 public:
     explicit Simulation(const Options& options)
-        : opts_(options), interval_(1500000000LL / opts_.speed_mm_s), archive_(opts_.output / "archive"),
+        : opts_(options), interval_(1500000000LL / opts_.speed_mm_s),
+          routes_(inference_routes(opts_.inference)),
+          m03_(8, 2, inference_limits(opts_)),
+          archive_(opts_.output / "archive"),
           capture_(archive_, "sim-host") {}
 
     Report execute();
@@ -293,6 +311,15 @@ private:
     Tick interval_;
     m01::AcquisitionService acq_;
     m02::CalibrationService m02_;
+    const std::vector<m03::Route> routes_;
+    m03::InferenceService m03_;
+    std::map<m03::State, unsigned> inference_counts_;
+    std::set<std::tuple<std::uint64_t, m03::ModelKey, std::uint64_t, std::uint64_t>> inference_windows_;
+    unsigned peak_inference_waiting_{}, peak_inference_running_{};
+    std::size_t peak_inference_bytes_{};
+    unsigned rejected_models_{};
+    Tick inference_now_{};
+    std::string last_inference_health_;
     std::vector<m01::TriggerEvent> sync_window_;
     std::map<unsigned, m02::CoverageStatus> coverage_;
     unsigned projected_depth_{}, e05_zero_points_{}, e05_masked_points_{}, spectrum_valid_{};
@@ -314,6 +341,13 @@ private:
     void accept(Tick now, m01::Output output);
     void calibrate(Tick now, const Session& session, const std::shared_ptr<const m01::Segment>& segment,
                    std::span<const m01::Diagnostic> diagnostics);
+    void activate_inference(const Session& session, const m02::Snapshot& snapshot);
+    void reject_candidate(const Session& next, Tick now);
+    void log_deployment(Tick now, std::uint64_t generation, std::string_view action,
+                        const std::vector<m03::ModelIdentity>& models, std::string_view reason = {});
+    void record_inference(Tick now, m03::Report report);
+    void advance_inference(Tick now);
+    void close_inference(const Session& session, Tick now);
     double displacement(const Session& session, Tick exposure) const;
     Tick exposure_at(const Session& session, Source source, unsigned local) const;
     void archive_until(Tick now);
@@ -344,13 +378,15 @@ void Simulation::check(bool value, std::string problem) {
 }
 
 void Simulation::run_session(const Session& session, const Session* previous) {
-    m02_.install(calibration(session.config, opts_.scenario, interval_));
+    const auto snapshot = calibration(session.config, opts_.scenario, interval_);
+    m02_.install(snapshot);
     sync_window_.clear();
     acq_.start(session.config, session.start);
     log(session.start, previous ? "reconnect" : "start",
         object({{"generation", std::to_string(session.config.generation)},
                 {"encoderEpoch", std::to_string(session.config.encoder_epoch)},
                 {"syncSession", std::to_string(session.config.sync.session)}}));
+    activate_inference(session, snapshot);
     std::vector<Event> events;
     const auto duration = interval_ * session.count;
     const auto stop = session.start + duration + session.config.match_timeout + 12ms;
@@ -400,18 +436,20 @@ void Simulation::run_session(const Session& session, const Session* previous) {
             events.push_back({exposure + 760us, exposure, Input::Depth, {local}, ++depth_expected_});
         }
     }
-    if (previous) {
+    if (previous && opts_.scenario == Scenario::Reconnect) {
         const auto at = session.start + 1450us;
         events.push_back({at, previous->start + previous->count * interval_, Input::Rgb, {previous->count}, 0, true});
     }
     std::ranges::stable_sort(events, {}, &Event::at);
     for (const auto& event : events) {
         archive_until(event.at);
+        if (event.input == Input::Advance) advance_inference(event.at);
         deliver(event.old ? *previous : session, event);
         observe_health(event.at);
     }
     archive_until(stop);
     accept(stop, acq_.close(stop, trigger_key(session, session.count)));
+    close_inference(session, stop);
     log(stop, "close", object({{"generation", std::to_string(session.config.generation)}}));
     observe_health(stop);
 }
@@ -570,7 +608,7 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
         const auto trigger = std::ranges::find(sync_window_, *row->header.trigger, &m01::TriggerEvent::key);
         if (trigger != sync_window_.end()) references.push_back({row->header.id, *trigger});
     }
-    const auto result = m02_.process(segment, {&window, &environment, nullptr, diagnostics, references});
+    auto result = m02_.process(segment, {&window, &environment, nullptr, diagnostics, references});
     if (!result.issue.empty() || !result.snapshot) {
         check(false, "M02 could not process generation " + std::to_string(config.generation) + ": " +
                      std::string(result.issue));
@@ -635,6 +673,166 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
             {"trigger", std::to_string(trigger)}, {"geometry", quote(versions.geometry)}, {"valid", std::to_string(valid)},
             {"zeros", std::to_string(zeros)}, {"masked", std::to_string(masked)}, {"observation", describe_alignment(&row)}}));
     }
+    if (!routes_.empty() && (!result.triggers.empty() || !result.acquisition_diagnostics.empty())) {
+        auto deadline = now + inference_budget;
+        for (const auto& trigger : result.triggers) {
+            const auto reference = trigger.reference_time ? trigger.reference_time->value :
+                session.start + interval_ * static_cast<Tick::rep>(trigger.source.event.key.id);
+            deadline = std::min(deadline, reference + inference_budget);
+        }
+        auto report = m03_.ingest(std::make_shared<m02::Result>(std::move(result)), now, deadline);
+        record_inference(now, std::move(report));
+    }
+}
+
+void Simulation::log_deployment(Tick now, std::uint64_t generation, std::string_view action,
+                                const std::vector<m03::ModelIdentity>& models, std::string_view reason) {
+    const auto status = m03_.deployment_status();
+    std::vector<m03::ModelIdentity> active;
+    for (const auto& entry : status.active) {
+        active.insert(active.end(), entry.second.begin(), entry.second.end());
+    }
+    log(now, "m03-model", object({{"action", quote(action)}, {"generation", std::to_string(generation)},
+        {"models", array(models, describe_model)}, {"active", array(active, describe_model)}, {"reason", quote(reason)}}));
+}
+
+void Simulation::activate_inference(const Session& session, const m02::Snapshot& snapshot) {
+    if (routes_.empty()) return;
+    const auto generation = session.config.generation;
+    auto delay = 2ms;
+    if (opts_.scenario == Scenario::InferenceOverload) delay = 125ms;
+    if (opts_.scenario == Scenario::ModelSwitch && generation == 1) delay = 42ms;
+    SimulationBackend backend(delay);
+    m03::Activation activation{session.config.first_expected_trigger.value(), {}};
+    for (auto route : routes_) {
+        auto manifest = inference_manifest(route, session.config, snapshot, std::to_string(generation), opts_.allow_masks);
+        const auto identity = manifest.identity;
+        activation.models.push_back(identity.key);
+        m03_.install(std::move(manifest), inference_artifact(identity.key.version), backend);
+        log_deployment(session.start, generation, "warmed", {identity});
+    }
+    m03_.activate(session.config, snapshot, activation);
+    log_deployment(session.start, generation, "activated",
+                   m03_.deployment_status().active.at({session.config.run_id, generation}));
+}
+
+void Simulation::reject_candidate(const Session& next, Tick now) {
+    const auto snapshot = calibration(next.config, opts_.scenario, interval_);
+    auto candidate = inference_manifest(routes_.back(), next.config, snapshot, "candidate", opts_.allow_masks);
+    if (candidate.hsi) std::swap(candidate.hsi->bands[0], candidate.hsi->bands[1]);
+    else ++candidate.raster.left;
+    const auto identity = candidate.identity;
+    SimulationBackend backend(2ms);
+    m03_.install(std::move(candidate), inference_artifact(identity.key.version), backend);
+    log_deployment(now, next.config.generation, "warmed", {identity});
+    try {
+        m03_.activate(next.config, snapshot, {*next.config.first_expected_trigger, {identity.key}});
+        check(false, "M03 activated an incompatible candidate");
+    } catch (const std::invalid_argument& error) {
+        check(std::string_view(error.what()) == "model crop, format or ordered bands mismatch",
+              "M03 candidate was rejected for an unexpected reason");
+        ++rejected_models_;
+        log_deployment(now, next.config.generation, "rejected", {identity}, error.what());
+    }
+    check(m03_.unload(identity.key), "M03 could not unload the rejected candidate");
+}
+
+std::string inference_evidence(const m03::Evidence& evidence, const Session& session) {
+    const auto source = [&](Source sensor) {
+        const auto first = std::ranges::find_if(evidence.samples, [&](const auto& sample) {
+            return sample.source.observation.source == sensor;
+        });
+        if (first == evidence.samples.end()) return std::string("null");
+        const auto& id = first->source.observation;
+        const auto& p = first->belt.position;
+        return object({{"trigger", std::to_string(session.base + first->source.trigger.id)},
+            {"segment", std::to_string(first->source.segment_sequence)}, {"frame", std::to_string(id.frame)},
+            {"row", std::to_string(id.row)}, {"session", std::to_string(id.session)},
+            {"column", std::to_string(first->source.column)}, {"referenceMs", time(first->time.value)},
+            {"count", first->count ? decimal(first->count->value) : "null"},
+            {"belt", "[" + decimal(p.x) + "," + decimal(p.y) + "," + decimal(p.z) + "]"}});
+    };
+    std::optional<std::array<double, 4>> bounds;
+    for (const auto& sample : evidence.samples) {
+        if (!sample.count) continue;
+        const auto distance = (session.base + sample.count->value / encoder_counts_per_line) * pitch_mm;
+        const auto x = sample.belt.position.x - static_cast<double>(distance);
+        const auto y = sample.belt.position.y;
+        if (!bounds) bounds = std::array{x, y, x, y};
+        auto& [x0, y0, x1, y1] = *bounds;
+        x0 = std::min(x0, x);
+        y0 = std::min(y0, y);
+        x1 = std::max(x1, x);
+        y1 = std::max(y1, y);
+    }
+    return object({{"label", quote(evidence.label)}, {"points", std::to_string(evidence.samples.size())},
+        {"bounds", bounds ? array(*bounds, [](double value) { return decimal(value); }) : "null"},
+        {"rgb", source(Source::Rgb)}, {"hsi", source(Source::Hsi)}});
+}
+
+void Simulation::record_inference(Tick now, m03::Report report) {
+    inference_now_ = now;
+    for (const auto& result : report.windows) {
+        const auto& id = result.window;
+        const auto generation = id.generation.config_epoch;
+        check(generation > 0 && generation <= sessions_.size(), "M03 result has an unknown generation");
+        if (!generation || generation > sessions_.size()) continue;
+        const auto& session = sessions_[generation - 1];
+        check(id.first && id.last >= id.first && id.last <= session.count &&
+              inference_windows_.emplace(generation, id.model, id.first, id.last).second,
+              "M03 returned a duplicate or out-of-generation window");
+        const bool online = result.state == m03::State::Completed || result.state == m03::State::NoDetection;
+        check((result.state == m03::State::Completed) == !result.evidence.empty() &&
+              (!online || result.finished < result.deadline) &&
+              result.state != m03::State::Failed && result.state != m03::State::Rejected, "unexpected M03 result state");
+        ++inference_counts_[result.state];
+        const auto counts = [&](const std::optional<m03::SampleCount>& samples) {
+            return samples ? object({{"valid", std::to_string(samples->valid)}, {"total", std::to_string(samples->total)}})
+                           : "null";
+        };
+        const auto& quality = result.input_quality;
+        const bool partial_tail = result.reason == "unfinished_window_at_boundary";
+        const auto input = quality ? object({{"missingTriggers", array(quality->missing_triggers, [&](auto trigger) {
+            return std::to_string(session.base + trigger);
+        })}, {"rgb", counts(quality->rgb)}, {"hsi", counts(quality->hsi)}}) : "null";
+        log(now, "m03-window", object({{"first", std::to_string(session.base + id.first)},
+            {"last", std::to_string(session.base + id.last)}, {"generation", std::to_string(generation)},
+            {"state", quote(name(result.state))}, {"reason", quote(result.reason)}, {"model", describe_model(result.model)},
+            {"reference", result.calibration ? quote(result.calibration->spectral_reference) : "null"},
+            {"firstReceivedMs", partial_tail ? "null" : time(result.first_received)},
+            {"readyMs", partial_tail ? "null" : time(result.ready)},
+            {"preparedMs", time(result.prepared)}, {"startedMs", time(result.started)},
+            {"backendMs", time(result.backend_completed)}, {"finishedMs", time(result.finished)},
+            {"deadlineMs", result.deadline == Tick{} || result.deadline == Tick::max() ? "null" : time(result.deadline)},
+            {"quality", input}, {"evidence", array(result.evidence, [&](const auto& evidence) {
+                return inference_evidence(evidence, session);
+            })}}));
+    }
+    const auto health = m03_.health();
+    peak_inference_waiting_ = std::max(peak_inference_waiting_, static_cast<unsigned>(health.waiting));
+    peak_inference_running_ = std::max(peak_inference_running_, static_cast<unsigned>(health.running));
+    peak_inference_bytes_ = std::max(peak_inference_bytes_, health.retained_bytes);
+    const auto data = object({{"waiting", std::to_string(health.waiting)}, {"running", std::to_string(health.running)},
+        {"bytes", std::to_string(health.retained_bytes)}, {"oldestMs", time(health.oldest_waiting_age)}});
+    if (data != last_inference_health_) {
+        last_inference_health_ = data;
+        log(now, "m03-health", data);
+    }
+}
+
+void Simulation::advance_inference(Tick now) {
+    if (!routes_.empty()) record_inference(now, m03_.advance(now));
+}
+
+void Simulation::close_inference(const Session& session, Tick now) {
+    if (routes_.empty()) return;
+    const auto generation = session.config.generation;
+    const m03::Generation key{session.config.run_id, generation};
+    record_inference(now, m03_.seal_through(key, session.count, now));
+    if (opts_.scenario == Scenario::ModelSwitch && generation == 1) reject_candidate(sessions_.at(1), now);
+    const auto status = m03_.deployment_status();
+    record_inference(now, m03_.retire(key, now, true));
+    log_deployment(now, generation, "draining", status.active.at(key));
 }
 
 void Simulation::archive_until(Tick until) {
@@ -681,6 +879,23 @@ void Simulation::observe_health(Tick now) {
 
 Report Simulation::verify() {
     Report out;
+    out.detected_windows = inference_counts_[m03::State::Completed];
+    out.empty_windows = inference_counts_[m03::State::NoDetection];
+    out.invalid_windows = inference_counts_[m03::State::InputInvalid];
+    out.expired_windows = inference_counts_[m03::State::Expired];
+    out.full_windows = inference_counts_[m03::State::QueueFull];
+    if (!routes_.empty()) {
+        std::size_t complete_windows = 0;
+        for (const auto& session : sessions_) {
+            complete_windows += (1 + (session.count - inference_rows) / inference_step) * routes_.size();
+        }
+        check(out.detected_windows + out.empty_windows + out.invalid_windows + out.expired_windows +
+              out.full_windows == complete_windows, "M03 lost or added complete windows");
+        check(m03_.health().retained_bytes == 0 && m03_.deployment_status().active.empty(),
+              "M03 work or activation remained after close");
+        check(rejected_models_ == (opts_.scenario == Scenario::ModelSwitch ? 1u : 0u),
+              "M03 model rejection count mismatched");
+    }
     const auto current = archive_.manifest(run_id);
     const auto health = acq_.health();
     check(!health.payload_bytes && !health.inflight_segments && !health.pending && pending_.empty(),
@@ -815,6 +1030,12 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
     const auto m02_summary = object({{"processed", std::to_string(report.calibrated)}, {"covered", std::to_string(report.covered)},
         {"depthProjected", std::to_string(projected_depth_)}, {"validZeroPoints", std::to_string(e05_zero_points_)},
         {"maskedPoints", std::to_string(e05_masked_points_)}, {"spectralValid", std::to_string(spectrum_valid_)}});
+    const auto m03_summary = object({{"detected", std::to_string(report.detected_windows)},
+        {"empty", std::to_string(report.empty_windows)}, {"invalid", std::to_string(report.invalid_windows)},
+        {"expired", std::to_string(report.expired_windows)}, {"queueFull", std::to_string(report.full_windows)},
+        {"retired", std::to_string(inference_counts_[m03::State::Retired])},
+        {"rejectedModels", std::to_string(rejected_models_)}, {"peakWaiting", std::to_string(peak_inference_waiting_)},
+        {"peakRunning", std::to_string(peak_inference_running_)}, {"peakBytes", std::to_string(peak_inference_bytes_)}});
     const auto summary = object({{"passed", yes(report.passed)}, {"expected", std::to_string(trigger_count)},
         {"finalized", std::to_string(ledger_.size())}, {"paired", std::to_string(report.paired)},
         {"missing", std::to_string(report.missing)}, {"late", std::to_string(report.late)},
@@ -823,9 +1044,13 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"manifest", std::to_string(version)}, {"archiveGaps", std::to_string(gaps)},
         {"verifiedBlocks", std::to_string(report.verified)}, {"peakArchiveQueue", std::to_string(peak_pending_)},
         {"peakBytes", std::to_string(peak_bytes_)}, {"m02", m02_summary},
+        {"m03", routes_.empty() ? "null" : m03_summary},
         {"errors", array(errors_, [](const auto& error) { return quote(error); })}});
     const auto meta = object({{"scenario", quote(name(opts_.scenario))}, {"speed", std::to_string(opts_.speed_mm_s)},
         {"pitch", std::to_string(pitch_mm)}, {"depthMode", quote(opts_.depth == DepthMode::Encoder ? "encoder" : "independent")},
+        {"m03Mode", quote(name(opts_.inference))}, {"m03Mask", quote(opts_.allow_masks ? "allow" : "strict")},
+        {"m03Rows", std::to_string(inference_rows)}, {"m03Step", std::to_string(inference_step)},
+        {"m03BudgetMs", time(inference_budget)},
         {"durationMs", time(latest_)}, {"beltWidth", std::to_string(belt_width)}, {"scanX", std::to_string(scan_x)},
         {"hsiScanX", std::to_string(hsi_scan_position(opts_.scenario, interval_))},
         {"travel", std::to_string(travel)}, {"previewWidth", std::to_string(preview_width)},
@@ -879,7 +1104,7 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
 }
 
 Report Simulation::execute() {
-    if (opts_.scenario == Scenario::Reconnect) {
+    if (opts_.scenario == Scenario::Reconnect || opts_.scenario == Scenario::ModelSwitch) {
         auto one = settings(opts_, 1, interval_);
         const auto count = trigger_count / 2;
         const auto next = interval_ * count + one.match_timeout + 20ms;
@@ -890,6 +1115,10 @@ Report Simulation::execute() {
     }
     for (std::size_t i = 0; i < sessions_.size(); ++i) {
         run_session(sessions_[i], i ? &sessions_[i - 1] : nullptr);
+    }
+    const auto drained_by = inference_now_ + 3 * inference_budget;
+    while (m03_.health().retained_bytes && inference_now_ < drained_by) {
+        advance_inference(inference_now_ + 1ms);
     }
     archive_until(Tick::max());
     const auto sealed = archive_.seal(run_id, false, "M01 simulation inputs and tail processed");
@@ -917,6 +1146,8 @@ std::string_view name(Scenario scenario) {
     case Scenario::ClockMissing: return "clock-missing";
     case Scenario::CountInterpolation: return "count-interpolation";
     case Scenario::InvalidWhite: return "invalid-white";
+    case Scenario::InferenceOverload: return "inference-overload";
+    case Scenario::ModelSwitch: return "model-switch";
     }
     return {};
 }

@@ -7,9 +7,10 @@ namespace waste::m01sim {
 
 enum class Scenario {
     Normal, Missing, Late, Mixed, SlowArchive, Reconnect, TransportDelay, ExposureDelay,
-    Compensated, ExposureLimit, ClockMissing, CountInterpolation, InvalidWhite
+    Compensated, ExposureLimit, ClockMissing, CountInterpolation, InvalidWhite, InferenceOverload, ModelSwitch
 };
 enum class DepthMode { Independent, Encoder };
+enum class InferenceMode { Off, Rgb, Hsi, Split, Joint };
 
 struct Options {
     Scenario scenario{Scenario::Mixed};
@@ -17,14 +18,18 @@ struct Options {
     unsigned speed_mm_s{1000};
     Profile profile;
     std::filesystem::path output;
+    InferenceMode inference{InferenceMode::Joint};
+    bool allow_masks{};
 };
 
 struct Report {
     bool passed{};
     unsigned paired{}, missing{}, late{}, depth{}, verified{}, calibrated{}, covered{};
+    unsigned detected_windows{}, empty_windows{}, invalid_windows{}, expired_windows{}, full_windows{};
 };
 
 std::string_view name(Scenario scenario);
+std::string_view name(InferenceMode mode);
 Report run(const Options& options);
 
 }  // namespace waste::m01sim

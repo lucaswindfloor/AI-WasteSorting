@@ -123,7 +123,7 @@ $(BUILD_DIR)/m09-obj/%.o: %.cpp
 -include $(M09_OBJECTS:.o=.d)
 
 M01_SIM := $(BUILD_DIR)/m01_sim
-M01_SIM_SOURCES := $(wildcard sim/m01/*.cpp) $(M01_SOURCES) $(M02_SOURCES)
+M01_SIM_SOURCES := $(wildcard sim/m01/*.cpp) $(M01_SOURCES) $(M02_SOURCES) $(M03_SOURCES)
 M01_SIM_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/m01-sim-obj/%.o,$(M01_SIM_SOURCES))
 M01_SIM_ARCHIVE := $(addprefix $(BUILD_DIR)/m09-obj/src/m09_archive/,archive_service.o \
 	adapters/m01_capture_adapter.o evidence/evidence_index.o storage/archive_recovery.o \

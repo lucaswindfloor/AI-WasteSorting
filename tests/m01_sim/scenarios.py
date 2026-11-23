@@ -5,6 +5,7 @@ import json
 import math
 import subprocess
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -120,14 +121,109 @@ def check_calibration(data, expected):
         assert rows[120]["generation"] == 1 and rows[121]["generation"] == 2
 
 
-def run_case(binary, root, scenario, args, expected, covered):
-    out = root / scenario
+def check_inference(data):
+    meta, summary = data["meta"], data["summary"]["m03"]
+    events = [event for event in data["events"] if event["type"] == "m03-window"]
+    if meta["m03Mode"] == "off":
+        assert summary is None and not events
+        assert not any(event["type"].startswith("m03-") for event in data["events"])
+        return
+    windows = [event["data"] for event in events]
+    mode, scenario, masks = meta["m03Mode"], meta["scenario"], meta["m03Mask"]
+    branches = 2 if mode == "split" else 1
+    generations = 2 if scenario in {"reconnect", "model-switch"} else 1
+    assert len(windows) == (15 if generations == 1 else 14) * branches
+    totals = Counter(row["state"] for row in windows)
+    for field, state in (("detected", "completed"), ("empty", "no_detection"), ("invalid", "input_invalid"),
+                         ("expired", "expired"), ("queueFull", "queue_full"), ("retired", "retired")):
+        assert summary[field] == totals[state]
+    assert totals["retired"] == branches * generations
+    assert len({(w["first"], w["generation"], w["model"]["package"]) for w in windows}) == len(windows)
+    last_health = next(event["data"] for event in reversed(data["events"]) if event["type"] == "m03-health")
+    assert last_health["waiting"] == last_health["running"] == last_health["bytes"] == 0
+
+    acquisition = {event["data"]["trigger"]: event["data"] for event in data["events"] if event["type"] == "result"}
+    observed = set()
+    for event in events:
+        row = event["data"]
+        assert row["last"] <= (120 if row["generation"] == 1 and generations == 2 else 240)
+        assert row["model"]["version"] == str(row["generation"])
+        assert row["reference"] == f"sim-dark-white.g{row['generation']}"
+        assert (row["state"] == "completed") == bool(row["evidence"])
+        if row["state"] == "retired":
+            assert row["last"] - row["first"] + 1 < meta["m03Rows"]
+            continue
+        assert row["last"] - row["first"] + 1 == meta["m03Rows"]
+        if row["state"] in {"completed", "no_detection"}:
+            assert row["reason"] == ("" if row["state"] == "completed" else "no_valid_candidates")
+            assert row["firstReceivedMs"] <= row["readyMs"] <= row["preparedMs"] <= row["startedMs"]
+            assert row["startedMs"] <= row["backendMs"] <= row["finishedMs"] <= event["t"] < row["deadlineMs"]
+        for candidate in row["evidence"]:
+            observed.add(candidate["label"])
+            x0, y0, x1, y1 = candidate["bounds"]
+            assert x0 <= x1 and 0 <= y0 <= y1 <= meta["beltWidth"]
+            assert candidate["points"] >= 3
+            sensors = {"sim-rgb": {"rgb"}, "sim-hsi": {"hsi"}, "sim-joint": {"rgb", "hsi"}}
+            assert {sensor for sensor in ("rgb", "hsi") if candidate[sensor]} == sensors[row["model"]["package"]]
+            for sensor in sensors[row["model"]["package"]]:
+                source = candidate[sensor]
+                trigger = source["trigger"]
+                assert row["first"] <= trigger <= row["last"]
+                original = acquisition[trigger]
+                assert original["segment"] == source["segment"]
+                assert all(original[sensor][key] == source[key] for key in ("frame", "row", "session"))
+                assert 0 <= source["column"] < meta[sensor + "Width"]
+                distance = (trigger - original["local"] + source["count"] / 30) * meta["pitch"]
+                x, y, _ = source["belt"]
+                assert x0 - 1e-5 <= x - distance <= x1 + 1e-5 and y0 <= y <= y1
+
+    if scenario in {"normal", "transport-delay", "compensated", "model-switch"}:
+        assert "PET" in observed and "AL" in observed and totals["no_detection"] > 0
+    if scenario == "exposure-delay":
+        if mode == "joint":
+            assert totals["input_invalid"] == 14
+            assert all(row["reason"] == "too_many_missing_rows" and len(row["quality"]["missingTriggers"]) == 32
+                       for row in windows if row["state"] == "input_invalid")
+        else:
+            assert totals["completed"] + totals["no_detection"] == 28 and observed == {"object", "PET", "AL"}
+    if scenario == "mixed":
+        if masks == "strict":
+            assert totals["input_invalid"] == 4
+            assert {trigger for row in windows if row["quality"] for trigger in row["quality"]["missingTriggers"]} == {87, 153}
+        else:
+            assert not totals["input_invalid"] and totals["completed"] > 0
+    if scenario == "invalid-white":
+        if masks == "strict":
+            assert totals["input_invalid"] == 14
+            assert all(row["reason"] == "insufficient_valid_samples" for row in windows if row["state"] == "input_invalid")
+        else:
+            assert not totals["input_invalid"] and totals["completed"] > 0
+        assert all(row["quality"]["hsi"]["valid"] * meta["hsiBands"] ==
+                   row["quality"]["hsi"]["total"] * (meta["hsiBands"] - 1) for row in windows if row["quality"])
+    if scenario == "inference-overload":
+        assert totals["expired"] > 0 and totals["queue_full"] > 0 and not observed
+        assert summary["peakWaiting"] == 2 and summary["peakRunning"] == 1
+    if scenario == "model-switch":
+        deployments = [event for event in data["events"] if event["type"] == "m03-model"]
+        rejected = next(event for event in deployments if event["data"]["action"] == "rejected")
+        enabled = next(event for event in deployments if event["data"]["action"] == "activated" and event["data"]["generation"] == 2)
+        initial = next(event for event in deployments if event["data"]["action"] == "activated" and event["data"]["generation"] == 1)
+        assert rejected["t"] < enabled["t"] and summary["rejectedModels"] == 1
+        assert [identity["version"] for identity in rejected["data"]["active"]] == ["1"]
+        assert initial["data"]["models"][0]["digest"] != enabled["data"]["models"][0]["digest"]
+        assert any(event["t"] > enabled["t"] and event["data"]["generation"] == 1 and
+                   event["data"]["state"] in {"completed", "no_detection"} for event in events)
+
+
+def run_case(binary, root, scenario, args, expected, covered, variant=""):
+    out = root / (scenario + variant)
     command = [binary, "--scenario", scenario, "--output", str(out), *args]
     run = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert run.returncode == 0, f"{scenario}: {run.stdout}\n{run.stderr}"
     data = json.loads((out / "report.json").read_text())
     check_geometry(data)
     check_calibration(data, covered)
+    check_inference(data)
     summary = data["summary"]
     assert summary["passed"] and not summary["errors"], summary
     assert (summary["paired"], summary["missing"], summary["late"], summary["rejectedOld"]) == expected
@@ -179,6 +275,13 @@ def main():
         ("clock-missing", [], (240, 0, 0, 0), 0),
         ("count-interpolation", [], (240, 0, 0, 0), 239),
         ("invalid-white", [], (240, 0, 0, 0), 240),
+        ("invalid-white", ["--m03-mask", "allow"], (240, 0, 0, 0), 240, "-masked"),
+        ("mixed", ["--m03-mask", "allow"], (238, 2, 1, 0), 238, "-masked"),
+        ("exposure-delay", ["--m03", "split", "--speed-mm-s", "2000"], (240, 0, 0, 0), 0, "-split"),
+        ("model-switch", ["--speed-mm-s", "2000"], (240, 0, 0, 0), 240),
+        ("inference-overload", ["--speed-mm-s", "2000"], (240, 0, 0, 0), 240),
+        ("normal", ["--m03", "hsi"], (240, 0, 0, 0), 240, "-hsi"),
+        ("normal", ["--m03", "off"], (240, 0, 0, 0), 240, "-off"),
     ]
     with TemporaryDirectory(prefix="waste-m01-sim-test-") as path:
         root = Path(path)
@@ -191,7 +294,7 @@ def main():
         again = subprocess.run([binary, "--output", str(root / "again")], capture_output=True, timeout=90)
         assert again.returncode == 0
         assert json.loads((root / "again" / "report.json").read_text()) == reports[3]
-    print("M01/M02 simulator regression passed")
+    print("M01/M02/M03 simulator regression passed")
 
 
 if __name__ == "__main__":

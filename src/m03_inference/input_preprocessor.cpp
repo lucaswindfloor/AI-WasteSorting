@@ -186,7 +186,7 @@ Preparation prepare(const Manifest& m, const Window& window) {
     auto* hsi = m.hsi ? &input->tensors.back() : nullptr;
 
     std::vector<RasterRow> source_rows(r.rows);
-    std::size_t missing = 0;
+    InputQuality quality;
     for (std::size_t i = 0; i < r.rows; ++i) {
         if (const auto& slot = window.rows[r.top + i]) {
             source_rows[i] = read_row(m, *slot);
@@ -195,13 +195,14 @@ Preparation prepare(const Manifest& m, const Window& window) {
         if ((rgb && !row.rgb.observation) || (hsi && !row.hsi.observation) ||
             (m.route == Route::Joint &&
              std::ranges::none_of(row.hsi_column, [](const auto& index) { return index.has_value(); }))) {
-            ++missing;
+            quality.missing_triggers.push_back(window.id.first + r.top + i);
         }
     }
-    if (missing > m.window.max_missing_rows) {
-        return {{}, "too_many_missing_rows"};
+    if (quality.missing_triggers.size() > m.window.max_missing_rows) {
+        return {{}, "too_many_missing_rows", std::move(quality)};
     }
 
+    const auto joint = m.route == Route::Joint;
     std::size_t valid_rgb = 0, valid_hsi = 0;
     for (std::size_t y = 0; y < r.resized_rows; ++y) {
         const auto source_y = nearest(y, r.rows, r.resized_rows);
@@ -213,9 +214,11 @@ Preparation prepare(const Manifest& m, const Window& window) {
         for (std::size_t x = 0; x < r.resized_columns; ++x) {
             const auto column = nearest(x, r.columns, r.resized_columns);
             const auto pixel = (y + r.pad_top) * input->width + x + r.pad_left;
-            const auto joint = m.route == Route::Joint;
-            const auto hsi_column = joint ? (column < row.hsi_column.size() ? row.hsi_column[column] : std::nullopt)
-                                          : std::optional(column + r.left);
+            const auto hsi_column = [&]() -> std::optional<std::size_t> {
+                if (!joint) return column + r.left;
+                if (column < row.hsi_column.size()) return row.hsi_column[column];
+                return std::nullopt;
+            }();
             auto rgb_at = rgb ? location(row.rgb, *slot, column + r.left, joint) : std::nullopt;
             auto hsi_at = hsi && hsi_column ? location(row.hsi, *slot, *hsi_column, joint) : std::nullopt;
             if (joint && (!rgb_at || !hsi_at)) {
@@ -230,12 +233,14 @@ Preparation prepare(const Manifest& m, const Window& window) {
         }
     }
     const auto inner = r.resized_rows * r.resized_columns;
-    const auto enough = [&](const Tensor* tensor, std::size_t valid) {
-        const auto total = tensor ? inner * tensor->channels : 0;
-        return !tensor || (valid > 0 && static_cast<double>(valid) >= static_cast<double>(m.window.min_valid_fraction) * total);
+    if (rgb) quality.rgb = SampleCount{valid_rgb, inner * rgb->channels};
+    if (hsi) quality.hsi = SampleCount{valid_hsi, inner * hsi->channels};
+    const auto enough = [&](const std::optional<SampleCount>& count) {
+        return !count || (count->valid > 0 &&
+                          count->valid >= static_cast<double>(m.window.min_valid_fraction) * count->total);
     };
-    if (!enough(rgb, valid_rgb) || !enough(hsi, valid_hsi)) {
-        return {{}, "insufficient_valid_samples"};
+    if (!enough(quality.rgb) || !enough(quality.hsi)) {
+        return {{}, "insufficient_valid_samples", std::move(quality)};
     }
 
     input->retained_bytes = sizeof(PreparedInput) + input->source_map.capacity() * sizeof(PixelMap) +
@@ -243,7 +248,7 @@ Preparation prepare(const Manifest& m, const Window& window) {
     for (const auto& tensor : input->tensors) {
         input->retained_bytes += tensor.values.capacity() * sizeof(float) + tensor.valid.capacity();
     }
-    return {std::move(input), {}};
+    return {std::move(input), {}, std::move(quality)};
 }
 
 }  // namespace waste::m03

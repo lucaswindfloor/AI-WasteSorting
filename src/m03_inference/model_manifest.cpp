@@ -10,6 +10,7 @@ namespace {
 
 // Structural limits bound allocations even for an incorrectly configured package.
 constexpr std::size_t max_axis = 4096;
+constexpr std::size_t max_native_columns = 8192;
 constexpr std::size_t max_pixels = 1024 * 1024;
 constexpr std::size_t max_values = 4 * 1024 * 1024;
 constexpr std::size_t max_projection_work = 8 * 1024 * 1024;
@@ -55,7 +56,7 @@ void validate(const Manifest& m) {
     }
     const auto& r = m.raster;
     if (!r.rows || !r.columns || r.top >= w.rows || r.rows > w.rows - r.top ||
-        r.left > max_axis || r.columns > max_axis || !r.resized_rows || !r.resized_columns ||
+        r.left > max_native_columns || r.columns > max_native_columns || !r.resized_rows || !r.resized_columns ||
         r.resized_rows > max_axis || r.resized_columns > max_axis ||
         r.pad_top > max_axis || r.pad_left > max_axis || r.pad_bottom > max_axis || r.pad_right > max_axis ||
         r.height() > max_axis || r.width() > max_axis || !std::isfinite(r.fill)) {

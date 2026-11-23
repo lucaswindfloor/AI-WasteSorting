@@ -19,6 +19,20 @@ void manifest_test() {
     } catch (const std::invalid_argument&) {
     }
 
+    auto wide_config = m02::test::acquisition_config();
+    wide_config.rgb.format.width = 8192;
+    const auto wide_snapshot = m02::test::calibration(wide_config);
+    auto wide = manifest();
+    wide.raster.columns = 8192;
+    validate(wide);
+    verify_compatibility(wide, wide_config, wide_snapshot);
+    ++wide.raster.columns;
+    try {
+        validate(wide);
+        throw std::logic_error("native crop exceeded the source width limit");
+    } catch (const std::invalid_argument&) {
+    }
+
     ModelRegistry registry(2);
     FakeBackend backend;
     const std::array artifact{std::byte{1}};

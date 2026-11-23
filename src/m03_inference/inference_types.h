@@ -103,6 +103,15 @@ struct Evidence {
     std::vector<SampleLocation> samples;
 };
 
+struct SampleCount {
+    std::size_t valid{}, total{};
+};
+
+struct InputQuality {
+    std::vector<std::uint64_t> missing_triggers;
+    std::optional<SampleCount> rgb, hsi;
+};
+
 struct Result {
     WindowId window;
     ModelIdentity model;
@@ -112,6 +121,7 @@ struct Result {
     Tick deadline{}, first_received{}, ready{}, finished{};
     std::optional<Tick> prepared, started, backend_completed;
     std::vector<Evidence> evidence;
+    std::optional<InputQuality> input_quality{};
 };
 
 struct Report {

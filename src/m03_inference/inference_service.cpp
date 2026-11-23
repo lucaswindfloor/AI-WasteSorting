@@ -102,6 +102,7 @@ void InferenceService::build_branch(Branch& branch, const m02::Versions& version
             continue;
         }
         auto preparation = prepare(branch.model->manifest, *window);
+        result.input_quality = std::move(preparation.quality);
         const auto prepared = current_tick(clock_, window->ready);
         result.prepared = prepared;
         if (!preparation.input) {

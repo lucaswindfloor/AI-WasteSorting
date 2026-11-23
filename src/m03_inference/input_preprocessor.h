@@ -7,6 +7,7 @@ namespace waste::m03 {
 struct Preparation {
     std::shared_ptr<const PreparedInput> input;
     std::string issue;
+    InputQuality quality{};
 };
 
 std::size_t input_bytes(const Manifest& manifest);

@@ -135,3 +135,24 @@ tr.selected { background: #213c51; }
   .calibration-grid { grid-template-columns: 1fr; }
   .outcome .meters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+.inference { margin-bottom: 13px; scroll-margin-top: 10px; }
+.inference-controls { justify-content: flex-start; }
+.inference-controls button { min-height: 32px; padding-block: 4px; font-size: .81rem; }
+.inference-controls input { accent-color: var(--cyan); }
+.inference-details > p { margin: 0 0 .55rem; }
+.inference-details td { white-space: nowrap; }
+.inference-image, .inference-details { min-width: 0; }
+.inference-image > p, .inference-deployment li, #inference-total { margin-top: .5rem; color: var(--muted); font-size: .81rem; }
+.inference-evidence { display: grid; gap: .55rem; margin-top: .6rem; }
+.inference-evidence:empty { display: none; }
+.inference-evidence > div { padding: .55rem .7rem; border-radius: 7px; background: #18283a; }
+.inference-evidence h3, .inference-deployment h3 { margin: 0 0 .25rem; font-size: .85rem; }
+.inference-evidence button { display: block; text-align: left; font-size: .79rem; }
+.inference-deployment { margin-top: 12px; border-top: 1px solid #273a50; padding-top: 10px; }
+.inference-deployment ul { margin: 0; padding-left: 1rem; }
+.inference-deployment li.model-rejected { color: #ffc886; }
+#inference-window { max-width: 100%; }
+@media (max-width: 620px) {
+  .inference-details th, .inference-details td { padding-inline: .28rem; font-size: .72rem; }
+}

@@ -1,5 +1,6 @@
 import { CalibrationView } from './calibration.mjs';
 import { distanceAt, drawAlignedPreview, drawBelt, drawPreview } from './drawing.mjs';
+import { InferenceView, windowKey } from './inference.mjs';
 
 const $ = (id) => document.getElementById(id);
 const names = {
@@ -8,8 +9,10 @@ const names = {
   Capacity: '采集缓冲不足', ConsumerBacklog: '消费端积压', MissingSync: '同步记录缺失',
   DuplicateConflict: '重复数据有冲突', InvalidPacket: '封包格式无效', UnknownAssociation: '触发归属待核',
 };
-const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02-depth', 'diagnostic', 'archive', 'reconnect', 'seal']);
+const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02-depth',
+  'm03-model', 'm03-window', 'diagnostic', 'archive', 'reconnect', 'seal']);
 const calibration = new CalibrationView();
+const inference = new InferenceView(inspectSource);
 const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let report = null;
 let selected = 0;
@@ -31,6 +34,7 @@ let latestPacket = null;
 let latestDiagnostic = null;
 let health = {};
 let firstGap = null;
+let firstCandidate = null;
 
 function status(text, kind = '') {
   $('run-status').textContent = text;
@@ -45,6 +49,7 @@ function showMessage(text) {
 function reset() {
   index = 0;
   calibration.reset();
+  inference.reset();
   seenPackets = 0;
   currentRows = new Map();
   archiveRows = new Map();
@@ -63,6 +68,7 @@ function reset() {
 function ingest(event) {
   const data = event.data;
   calibration.ingest(event);
+  inference.ingest(event);
   if (event.type === 'trigger') {
     latestTrigger = { ...data, t: event.t };
   } else if (event.type === 'reconnect') {
@@ -155,7 +161,8 @@ function paint() {
   const meta = report?.meta;
   const aligned = $('preview-mode').value === 'aligned';
   const outline = $('preview-outline').checked;
-  drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic);
+  drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic,
+    $('inference-overlay').checked ? inference.current()?.evidence : undefined);
   $('current-pulse').textContent = '触发 ' + (latestTrigger?.trigger ? '#' + latestTrigger.trigger : '—');
   $('time').textContent = cursor.toFixed(1) + ' ms';
   $('seek').value = cursor;
@@ -167,6 +174,7 @@ function paint() {
   paintTable();
   paintDetail();
   calibration.paint(selected, meta);
+  inference.paint(meta, currentRows);
   if (lastColumns !== currentRows.size) {
     lastColumns = currentRows.size;
     for (const sensor of ['rgb', 'hsi']) {
@@ -234,6 +242,18 @@ function jump(id) {
   showMessage('');
 }
 
+function inspectSource(trigger) {
+  pause();
+  if (currentRows.has(trigger)) {
+    selected = trigger;
+    $('trigger-input').value = trigger;
+    paint();
+  } else {
+    jump(trigger);
+  }
+  $('calibration').scrollIntoView();
+}
+
 function install(data) {
   report = data.report;
   const { meta, summary } = report;
@@ -245,9 +265,11 @@ function install(data) {
   $('trigger-input').max = summary.expected;
   firstGap = report.events.find((event) => event.type === 'result' && event.data.hsiQuality === 'missing');
   $('first-gap').disabled = !firstGap;
+  firstCandidate = report.events.find((event) => event.type === 'm03-window' && event.data.state === 'completed');
+  $('inference-first').disabled = !firstCandidate;
   $('geometry').textContent = '每 ' + meta.pitch + ' mm 触发一次 · ' + (meta.speed / 1000).toFixed(1) + ' m/s';
   $('band').textContent = meta.hsiPreviewBand + ' nm 模拟波段 · 伪彩';
-  status(summary.passed ? (summary.m02 ? 'M01 / M02 / M09 校验通过' : 'M01 / M09 校验通过') : '校验失败',
+  status(summary.passed ? '校验通过' : '校验失败',
     summary.passed ? 'ok' : 'warn');
   $('summary').textContent = summary.passed
     ? '已核对原始字节、源帧行和归档引用 · 封存清单 v' + summary.manifest +
@@ -259,6 +281,11 @@ function install(data) {
   $('late').textContent = summary.late;
   $('depth-total').textContent = summary.depth;
   $('verified').textContent = summary.verifiedBlocks;
+  const m03 = summary.m03;
+  $('inference-total').hidden = !m03;
+  $('inference-total').textContent = m03 ? 'M03 窗口 · 有候选 ' + m03.detected + ' · 无候选 ' + m03.empty +
+    ' · 输入无效 ' + m03.invalid + ' · 超期 ' + m03.expired + ' · 队列满 ' + m03.queueFull +
+    ' · 尾窗退役 ' + m03.retired : '';
   for (const [anchor, path] of [['csv', 'ledger.csv'], ['json', 'report.json']]) {
     $(anchor).href = '/runs/' + encodeURIComponent(data.id) + '/' + path;
     $(anchor).hidden = false;
@@ -317,6 +344,18 @@ $('exposure').addEventListener('click', () => {
 $('first-gap').addEventListener('click', () => {
   if (firstGap) jump(firstGap.data.trigger);
 });
+$('inference-first').addEventListener('click', () => {
+  if (!firstCandidate) return;
+  pause();
+  seek(firstCandidate.t);
+  inference.selected = windowKey(firstCandidate.data);
+  paint();
+});
+$('inference-window').addEventListener('change', (event) => {
+  pause();
+  inference.selected = event.target.value;
+  paint();
+});
 function changePreview() {
   const aligned = $('preview-mode').value === 'aligned';
   $('preview-outline').disabled = !aligned;
@@ -327,6 +366,7 @@ function changePreview() {
   paint();
 }
 $('calibration-mode').addEventListener('change', paint);
+$('inference-overlay').addEventListener('change', paint);
 $('preview-mode').addEventListener('change', changePreview);
 $('preview-outline').addEventListener('change', changePreview);
 paint();

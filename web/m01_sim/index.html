@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c1524">
-  <title>M01 / M02 传送带仿真</title>
+  <title>传送带采集与推理仿真</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.mjs" type="module"></script>
 </head>
 <body>
   <header class="top">
-    <div class="brand"><span class="mark" aria-hidden="true">M01</span><div><h1>传送带采集仿真</h1><p>M01 采集 · M02 配准 · M09 归档</p></div></div>
+    <div class="brand"><span class="mark" aria-hidden="true">AI</span><div><h1>传送带采集与推理仿真</h1><p>M01 采集 · M02 配准 · M03 推理 · M09 归档</p></div></div>
     <p class="tag" id="run-status" role="status">待运行</p>
   </header>
   <main>
@@ -28,11 +28,20 @@
           <option value="count-interpolation">曝光计数插值</option>
           <option value="invalid-white">选定波段的暗白参考失效</option>
         </optgroup>
+        <optgroup label="M03 推理与模型">
+          <option value="inference-overload">推理变慢 · 队列过载</option>
+          <option value="model-switch">候选不兼容 · 运行中换版</option>
+        </optgroup>
       </select></label>
       <label>带速<select name="speed"><option value="500">0.5 m/s</option><option value="1000" selected>1.0 m/s</option><option value="2000">2.0 m/s</option><option value="3000">3.0 m/s</option></select></label>
       <label>深度采样<select name="depth"><option value="independent">独立采样</option><option value="encoder">每 8 次编码器触发</option></select></label>
       <label>模拟规格<select name="profile"><option value="demo">标准演示</option><option value="wide">较宽行与更多波段</option></select></label>
       <label>每包最多行数<select name="packetLines"><option value="1">1 行</option><option value="2" selected>2 行</option><option value="4">4 行</option><option value="8">8 行</option></select></label>
+      <label>M03 推理路径<select name="inference">
+        <option value="joint">RGB＋HSI 联合</option><option value="split">RGB／HSI 分路</option>
+        <option value="rgb">仅 RGB 轮廓</option><option value="hsi">仅 HSI 材质</option><option value="off">关闭 M03</option>
+      </select></label>
+      <label>M03 输入要求<select name="masks"><option value="strict">要求完整输入</option><option value="allow">允许部分缺测</option></select></label>
       <button type="submit" class="primary" id="run">运行仿真</button>
     </form>
     <p id="message" class="notice" role="alert" hidden></p>
@@ -43,7 +52,7 @@
         <canvas id="belt" width="1000" height="380" aria-label="传送带顶视图，显示物料、编码器位置和扫描线" role="img"></canvas>
         <div class="transport">
           <button type="button" id="play" disabled>播放</button><button type="button" id="step" disabled>下一事件</button>
-          <input id="seek" aria-label="回放时间" type="range" min="0" max="1" step="0.001" value="0" disabled>
+          <input id="seek" aria-label="回放时间" type="range" min="0" max="1" step="any" value="0" disabled>
           <output class="mono" id="time">0.0 ms</output>
         </div>
         <dl class="meters"><div><dt>编码器计数</dt><dd id="count">—</dd></div><div><dt>当前位移</dt><dd id="distance">0 mm</dd></div>
@@ -63,6 +72,7 @@
         <div id="detail" class="detail">选择触发号查看源帧行和收件时刻。</div>
         <p id="diagnostic" class="diagnostic" hidden></p>
         <a class="calibration-link" href="#calibration">查看选中触发的 M02 配准</a>
+        <a class="calibration-link" href="#inference">查看 M03 推理窗口</a>
       </section>
     </div>
 
@@ -112,12 +122,42 @@
       </div>
     </section>
 
+    <section class="panel inference" id="inference">
+      <div class="head">
+        <div><h2>M03 推理窗口</h2><p id="inference-config">模拟规则读取实际扫描张量，输出窗口级轮廓或材质候选。</p></div>
+        <span class="tag" id="inference-status">待运行</span>
+      </div>
+      <div class="inference-controls calibration-tools">
+        <label>回放窗口 <select id="inference-window" disabled><option value="">跟随回放</option></select></label>
+        <button type="button" id="inference-first" disabled>跳到首个候选</button>
+        <label><input type="checkbox" id="inference-overlay" checked> 在传送带显示候选框</label>
+      </div>
+      <div class="calibration-grid">
+        <div class="inference-image">
+          <canvas id="inference-map" width="640" height="350" role="img" aria-label="按窗口回放扫描数据与 M03 候选框"></canvas>
+          <p id="inference-caption"></p>
+          <p id="inference-queue"></p>
+        </div>
+        <div class="inference-details calibration-details">
+          <p id="inference-version"></p>
+          <p id="inference-quality"></p>
+          <div class="table-scroll"><table>
+            <thead><tr><th scope="col">首段到达</th><th scope="col">组窗就绪</th><th scope="col">开始执行</th><th scope="col">结束／报告</th><th scope="col">截止</th></tr></thead>
+            <tbody id="inference-times"><tr><td colspan="5">等待窗口</td></tr></tbody>
+          </table></div>
+          <div id="inference-evidence" class="inference-evidence"></div>
+        </div>
+      </div>
+      <div class="inference-deployment"><h3>模型版本事件</h3><ul id="inference-models"><li>等待模型预热</li></ul></div>
+    </section>
+
     <section class="panel outcome">
       <div class="head"><div><h2>校验结果</h2><p id="summary">运行后显示采集、配准和归档的核对结果。</p></div>
         <div class="downloads"><a id="csv" hidden>下载账本 CSV</a><a id="json" hidden>下载事件 JSON</a></div></div>
       <dl class="meters"><div><dt>M01 完整配对</dt><dd id="pairs">—</dd></div><div><dt>M02 共同覆盖</dt><dd id="m02-total">—</dd></div><div><dt>HSI 缺口</dt><dd id="gaps">—</dd></div>
         <div><dt>晚到证据</dt><dd id="late">—</dd></div><div><dt>E05 观测</dt><dd id="depth-total">—</dd></div>
         <div><dt>M09 校验块</dt><dd id="verified">—</dd></div></dl>
+      <p id="inference-total" hidden></p>
     </section>
   </main>
 </body>

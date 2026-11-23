@@ -22,10 +22,19 @@ Scenario scenario(std::string_view value) {
     for (auto option : {Scenario::Normal, Scenario::Missing, Scenario::Late, Scenario::Mixed,
                         Scenario::SlowArchive, Scenario::Reconnect, Scenario::TransportDelay,
                         Scenario::ExposureDelay, Scenario::Compensated, Scenario::ExposureLimit,
-                        Scenario::ClockMissing, Scenario::CountInterpolation, Scenario::InvalidWhite}) {
+                        Scenario::ClockMissing, Scenario::CountInterpolation, Scenario::InvalidWhite,
+                        Scenario::InferenceOverload, Scenario::ModelSwitch}) {
         if (name(option) == value) return option;
     }
     throw std::invalid_argument("unknown scenario");
+}
+
+InferenceMode inference_mode(std::string_view value) {
+    for (auto mode : {InferenceMode::Off, InferenceMode::Rgb, InferenceMode::Hsi, InferenceMode::Split,
+                      InferenceMode::Joint}) {
+        if (name(mode) == value) return mode;
+    }
+    throw std::invalid_argument("unknown inference mode");
 }
 
 Options parse(int argc, char** argv) {
@@ -43,6 +52,9 @@ Options parse(int argc, char** argv) {
         else if (option == "--packet-lines") out.profile.packet_lines = bounded(value, 1, 8);
         else if (option == "--depth" && value == "independent") out.depth = DepthMode::Independent;
         else if (option == "--depth" && value == "encoder") out.depth = DepthMode::Encoder;
+        else if (option == "--m03") out.inference = inference_mode(value);
+        else if (option == "--m03-mask" && value == "allow") out.allow_masks = true;
+        else if (option == "--m03-mask" && value == "strict") out.allow_masks = false;
         else throw std::invalid_argument("unknown option or value: " + std::string(option));
     }
     if (out.output.empty()) {
@@ -58,8 +70,9 @@ void help() {
     std::cout << "m01_sim [--scenario NAME]\n"
                  "        normal|missing|late|mixed|slow-archive|reconnect\n"
                  "        transport-delay|exposure-delay|compensated|exposure-limit\n"
-                 "        clock-missing|count-interpolation|invalid-white\n"
+                 "        clock-missing|count-interpolation|invalid-white|inference-overload|model-switch\n"
                  "        [--speed-mm-s 500..3000] [--depth independent|encoder]\n"
+                 "        [--m03 off|rgb|hsi|split|joint] [--m03-mask strict|allow]\n"
                  "        [--rgb-width 16..8192] [--hsi-width 16..640]\n"
                  "        [--hsi-bands 2..224] [--packet-lines 1..8] [--output NEW_DIRECTORY]\n";
 }
@@ -76,6 +89,9 @@ int main(int argc, char** argv) {
         std::cout << (report.passed ? "PASS" : "FAIL")
                   << " pairs=" << report.paired << " missing=" << report.missing << " late=" << report.late
                   << " m02_coverage=" << report.covered << "/" << report.calibrated
+                  << " m03_detected=" << report.detected_windows << " m03_empty=" << report.empty_windows
+                  << " m03_invalid=" << report.invalid_windows << " m03_expired=" << report.expired_windows
+                  << " m03_queue_full=" << report.full_windows
                   << " depth=" << report.depth << " verified_archive_blocks=" << report.verified << '\n'
                   << "Report: " << (options.output / "report.json").string() << '\n'
                   << "Ledger: " << (options.output / "ledger.csv").string() << '\n';

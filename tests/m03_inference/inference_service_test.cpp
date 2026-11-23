@@ -63,10 +63,14 @@ void actual_upstream() {
             check(ready.windows.empty(), "incomplete real-source window emitted");
         }
     }
-    check(ready.windows.size() == 1 && ready.windows[0].state == State::Completed &&
+    check(ready.windows.size() == 1 && ready.windows[0].state == State::Completed && ready.windows[0].reason.empty() &&
           ready.windows[0].evidence[0].samples.size() == 8 &&
           ready.windows[0].evidence[0].samples[1].source.observation.source == m01::Source::Hsi,
           "M01/M02/M03 integration lost joint window evidence");
+    const auto& quality = ready.windows.front().input_quality;
+    check(quality && quality->missing_triggers.empty() && quality->rgb && quality->hsi &&
+          quality->rgb->valid == 24 && quality->rgb->total == 24 &&
+          quality->hsi->valid == 8 && quality->hsi->total == 8, "window sample quality was lost");
 }
 
 void version_and_deadline() {
@@ -129,7 +133,8 @@ void status_and_clock() {
     service.install(m, artifact, backend);
     service.activate(c, s, {2147, {m.identity.key}});
     auto report = service.ingest(segment(c, s, rows(2147)), 1ms, 100ms);
-    check(report.windows.size() == 1 && report.windows[0].state == State::NoDetection,
+    check(report.windows.size() == 1 && report.windows[0].state == State::NoDetection &&
+          report.windows[0].reason == "no_valid_candidates",
           "valid empty output was not distinguished");
     backend.controls->output = {{{4, 0.8f, {1, 0, 2, 1}, {}}}, {}};
     report = service.ingest(segment(c, s, rows(2151)), 2ms, 100ms);
