@@ -9,12 +9,65 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
+def check_geometry(data):
+    meta = data["meta"]
+    bottle, can = meta["objects"]
+    stations = bottle["footprint"]
+    assert [along for along, _ in stations] == sorted({along for along, _ in stations})
+    assert stations[0][0] == 0 and stations[-1][0] == 1
+    assert max(width for _, width in stations) == 1
+    assert stations[-3][1] > stations[-4][1]  # Cap widens again after the neck.
+    width = meta["previewWidth"]
+    belt_width = meta["beltWidth"]
+
+    def on_material(x, lateral):
+        for obj in (bottle, can):
+            along = (x - obj["x"]) / obj["length"] + 0.5
+            if not 0 < along < 1:
+                continue
+            for (a, w0), (b, w1) in zip(obj["footprint"], obj["footprint"][1:]):
+                if a <= along <= b:
+                    cross_width = obj["width"] * (w0 + (w1 - w0) * (along - a) / (b - a))
+                    if abs(lateral - obj["y"]) < cross_width / 2:
+                        return True
+                    break
+        return False
+
+    for event in data["events"]:
+        row = event["data"]
+        if event["type"] == "result":
+            assert row["displacementMm"] == row["trigger"] * meta["pitch"]
+            x = meta["scanX"] - row["displacementMm"]
+            for sensor in ("rgb", "hsi"):
+                pixels = row[sensor + "Pixels"]
+                if not pixels:
+                    assert sensor == "hsi" and row["hsiQuality"] == "missing"
+                    continue
+                native = meta[sensor + "Width"]
+                actual = ([pixels[i * 3 + 1] > 100 for i in range(width)] if sensor == "rgb"
+                          else [value > 2500 for value in pixels])
+                expected = [on_material(x, (int((i + 0.5) * native / width) + 0.5) * belt_width / native)
+                            for i in range(width)]
+                assert actual == expected, (meta["scenario"], row["trigger"], sensor)
+        elif event["type"] == "depth":
+            if meta["depthMode"] == "encoder":
+                expected = row["trigger"] * meta["pitch"]
+            else:
+                session = next(part for part in meta["motion"] if part["startMs"] <= row["receivedMs"]
+                               <= part["endMs"] + 0.760001)
+                exposure = row["receivedMs"] - 0.76
+                fraction = (exposure - session["startMs"]) / (session["endMs"] - session["startMs"])
+                expected = session["begin"] + fraction * (session["end"] - session["begin"])
+            assert abs(row["displacementMm"] - expected) < 1e-5
+
+
 def run_case(binary, root, scenario, args, expected):
     out = root / scenario
     command = [binary, "--scenario", scenario, "--output", str(out), *args]
     run = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert run.returncode == 0, f"{scenario}: {run.stdout}\n{run.stderr}"
     data = json.loads((out / "report.json").read_text())
+    check_geometry(data)
     summary = data["summary"]
     assert summary["passed"] and not summary["errors"], summary
     assert (summary["paired"], summary["missing"], summary["late"], summary["rejectedOld"]) == expected

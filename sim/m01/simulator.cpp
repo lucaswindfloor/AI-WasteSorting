@@ -404,6 +404,7 @@ void Simulation::accept(Tick now, m01::Output output) {
                     p->hsi ? std::optional(p->hsi->received) : std::nullopt, p->rgb_quality, p->hsi_quality};
                 check(ledger_.emplace(global, row).second, "duplicate M01 result for trigger " + std::to_string(global));
                 log(now, "result", object({{"trigger", std::to_string(global)}, {"local", std::to_string(local)},
+                    {"displacementMm", std::to_string(global * pitch_mm)},
                     {"count", std::to_string(row.count)}, {"generation", std::to_string(row.generation)},
                     {"segment", std::to_string(row.segment)}, {"syncReceivedMs", time(p->received)},
                     {"rgbQuality", quote(quality(p->rgb_quality))}, {"hsiQuality", quote(quality(p->hsi_quality))},
@@ -423,9 +424,11 @@ void Simulation::accept(Tick now, m01::Output output) {
                       (expected_mask == d->header.valid_mask.has_value()) &&
                       ((opts_.depth == DepthMode::Encoder && linked && (linked - session.base) % 8 == 0) ||
                        (opts_.depth == DepthMode::Independent && !linked)), "M01 E05 timing or validity mismatched");
-                depth_.push_back({d->header.id, (session.base + steps) * pitch_mm, expected_mask, zero, mask});
+                const auto displacement = (session.base + steps) * pitch_mm;
+                depth_.push_back({d->header.id, displacement, expected_mask, zero, mask});
                 log(now, "depth", object({{"frame", std::to_string(d->header.id.frame)},
                     {"session", std::to_string(d->header.id.session)}, {"trigger", std::to_string(linked)},
+                    {"displacementMm", std::to_string(displacement)},
                     {"receivedMs", time(d->received)}, {"validZeros", std::to_string(zero)},
                     {"masked", std::to_string(mask)}, {"pixels", integers(pixels)}}));
             }
@@ -614,7 +617,10 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"packetLines", std::to_string(p.packet_lines)},
         {"objects", array(materials, [](const Material& item) {
             return object({{"id", quote(item.id)}, {"material", quote(item.kind)}, {"x", std::to_string(item.x)},
-                {"y", std::to_string(item.y)}, {"length", std::to_string(item.length)}, {"width", std::to_string(item.width)}});
+                {"y", std::to_string(item.y)}, {"length", std::to_string(item.length)}, {"width", std::to_string(item.width)},
+                {"footprint", array(footprint(item), [](const ProfileStation& station) {
+                    return "[" + std::to_string(station.along) + "," + std::to_string(station.width_fraction) + "]";
+                })}});
         })},
         {"motion", array(sessions_, [&](const Session& session) {
             return object({{"startMs", time(session.start)}, {"endMs", time(session.start + interval_ * session.count)},

@@ -56,13 +56,20 @@
       </section>
     </div>
 
+    <section class="panel preview-controls" aria-label="扫描预览方式">
+      <label>预览方式 <select id="preview-mode">
+        <option value="aligned">皮带坐标 · 等比例</option><option value="raw">采集顺序 · 原始预览</option>
+      </select></label>
+      <label><input type="checkbox" id="preview-outline" checked> 叠加仿真轮廓</label>
+      <p id="preview-note">三图按皮带毫米坐标等比例显示，朝向与顶视图一致。虚线是仿真轮廓；深度只标出实测位置，不插值。</p>
+    </section>
     <section class="previews" aria-label="M01 实收的预览">
       <article class="panel sensor"><div class="head"><div><h2>RGB 线扫</h2><p>实收 RGB 行</p></div><span class="label rgb">R01</span></div>
-        <canvas id="rgb" width="240" height="126" role="img" aria-label="M01 实收 RGB 扫描行拼图"></canvas></article>
+        <canvas id="rgb" width="400" height="272" role="img" aria-label="M01 实收 RGB 扫描行拼图"></canvas></article>
       <article class="panel sensor"><div class="head"><div><h2>高光谱线扫</h2><p id="band">选定波段 · 伪彩</p></div><span class="label hsi">H01</span></div>
-        <canvas id="hsi" width="240" height="126" role="img" aria-label="M01 实收高光谱选定波段，琥珀色表示缺行"></canvas></article>
+        <canvas id="hsi" width="400" height="272" role="img" aria-label="M01 实收高光谱选定波段，琥珀色表示缺行"></canvas></article>
       <article class="panel sensor"><div class="head"><div><h2>深度观测</h2><p>含有效零高和掩膜缺测</p></div><span class="label depth">E05</span></div>
-        <canvas id="depth" width="240" height="126" role="img" aria-label="M01 实收深度图，琥珀色表示无效点"></canvas></article>
+        <canvas id="depth" width="400" height="272" role="img" aria-label="M01 实收深度图，琥珀色表示无效点"></canvas></article>
     </section>
 
     <section class="panel outcome">

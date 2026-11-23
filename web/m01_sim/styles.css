@@ -89,7 +89,10 @@ tr.selected { background: #213c51; }
 .detail { white-space: pre-wrap; min-height: 2.7rem; margin: 10px 0 0; color: #a9c1d7; font-size: .79rem; line-height: 1.5; }
 .diagnostic { margin: .5rem 0 0; color: #ffd098; font-size: .82rem; }
 .previews { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; margin-bottom: 13px; }
-.sensor canvas { aspect-ratio: 240 / 94; }
+.sensor { display: flex; flex-direction: column; }
+.sensor canvas { margin-top: auto; }
+.preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 13px; }
+.preview-controls p { flex-basis: 100%; margin: 0; color: #a9c1d7; font-size: .82rem; }
 .label.rgb { color: #83e8f1; }
 .label.hsi { color: #beb1ff; }
 .label.depth { color: #8ae0b8; }

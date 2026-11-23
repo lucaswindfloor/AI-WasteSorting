@@ -1,4 +1,4 @@
-import { distanceAt, drawBelt, drawPreview } from './drawing.mjs';
+import { distanceAt, drawAlignedPreview, drawBelt, drawPreview } from './drawing.mjs';
 
 const $ = (id) => document.getElementById(id);
 const names = {
@@ -71,7 +71,7 @@ function ingest(event) {
     cameraRows[data.trigger - 1] = data;
   } else if (event.type === 'depth') {
     depthCount++;
-    depthRows.push(data.pixels);
+    depthRows.push(data);
   } else if (event.type === 'diagnostic') {
     latestDiagnostic = { ...data, t: event.t };
   } else if (event.type === 'health') {
@@ -149,6 +149,8 @@ function paintDetail() {
 
 function paint() {
   const meta = report?.meta;
+  const aligned = $('preview-mode').value === 'aligned';
+  const outline = $('preview-outline').checked;
   drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic);
   $('current-pulse').textContent = '触发 ' + (latestTrigger?.trigger ? '#' + latestTrigger.trigger : '—');
   $('time').textContent = cursor.toFixed(1) + ' ms';
@@ -162,14 +164,21 @@ function paint() {
   paintDetail();
   if (lastColumns !== currentRows.size) {
     lastColumns = currentRows.size;
-    const rgb = Array.from(cameraRows, (row) => row?.rgbPixels ?? null);
-    const hsi = Array.from(cameraRows, (row) => row?.hsiPixels ?? null);
-    drawPreview($('rgb'), rgb, 'rgb', meta?.previewWidth);
-    drawPreview($('hsi'), hsi, 'hsi', meta?.previewWidth);
+    for (const sensor of ['rgb', 'hsi']) {
+      if (aligned) {
+        const samples = [...currentRows.values()].map((row) =>
+          ({ displacementMm: row.displacementMm, pixels: row[sensor + 'Pixels'] }));
+        drawAlignedPreview($(sensor), samples, sensor, meta, outline);
+      } else {
+        const pixels = Array.from(cameraRows, (row) => row?.[sensor + 'Pixels'] ?? null);
+        drawPreview($(sensor), pixels, sensor, meta?.previewWidth);
+      }
+    }
   }
   if (lastDepths !== depthCount) {
     lastDepths = depthCount;
-    drawPreview($('depth'), depthRows, 'depth', meta?.previewWidth);
+    if (aligned) drawAlignedPreview($('depth'), depthRows, 'depth', meta, outline);
+    else drawPreview($('depth'), depthRows.map((row) => row.pixels), 'depth', meta?.previewWidth);
   }
 }
 
@@ -300,4 +309,15 @@ $('exposure').addEventListener('click', () => {
 $('first-gap').addEventListener('click', () => {
   if (firstGap) jump(firstGap.data.trigger);
 });
+function changePreview() {
+  const aligned = $('preview-mode').value === 'aligned';
+  $('preview-outline').disabled = !aligned;
+  $('preview-note').textContent = aligned
+    ? '三图按皮带毫米坐标等比例显示，朝向与顶视图一致。虚线是仿真轮廓；深度只标出实测位置，不插值。'
+    : '从左向右按触发或观测顺序拼接，先扫到的一端在左；此模式不按毫米等比例绘制。';
+  lastColumns = lastDepths = -1;
+  paint();
+}
+$('preview-mode').addEventListener('change', changePreview);
+$('preview-outline').addEventListener('change', changePreview);
 paint();

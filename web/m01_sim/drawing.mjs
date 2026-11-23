@@ -45,35 +45,38 @@ export function distanceAt(meta, now) {
   return distance;
 }
 
-function drawMaterial(ctx, item, offset, x, y) {
-  const center = x(item.x + offset);
-  const lane = y(item.y);
-  const width = x(item.length) - x(0);
-  const height = y(item.width) - y(0);
-  if (item.material === 'PET') {
-    const body = width * 0.76;
-    box(ctx, center - 0.5 * width, lane - height / 2, body, height, 11, '#217fa0', '#81e2fa');
-    box(ctx, center + 0.24 * width, lane - height * 0.24, width * 0.17, height * 0.48, 3, '#2e8ca6', '#81e2fa');
-    box(ctx, center + 0.395 * width, lane - height * 0.29, width * 0.106, height * 0.58, 2, '#74ddf4');
-    box(ctx, center - width * 0.21, lane - height * 0.44, width * 0.26, height * 0.88, 3, '#5ec8db');
-    line(ctx, center - width * 0.43, lane - height * 0.33, center + width * 0.20,
-      lane - height * 0.33, '#8dd7e7');
-  } else {
-    box(ctx, center - width / 2, lane - height / 2, width, height, 9, '#a96836', '#ffc78d');
-    line(ctx, center - width * 0.34, lane - height * 0.34, center + width * 0.32,
-      lane - height * 0.34, '#ffd39f', 2);
-    box(ctx, center + width * 0.29, lane - height * 0.38, width * 0.12, height * 0.75, 3, '#e4ad74');
-    box(ctx, center - width * 0.33, lane + height * 0.17, width * 0.44, height * 0.11, 3, '#d4905c');
+function drawFootprint(ctx, item, offset, x, y, stroke, fill) {
+  if (!item.footprint?.length) return;
+  ctx.beginPath();
+  for (const [side, stations] of [[-1, item.footprint], [1, [...item.footprint].reverse()]]) {
+    for (const [along, width] of stations) {
+      ctx.lineTo(x(item.x + offset + (along - 0.5) * item.length), y(item.y + side * width * item.width / 2));
+    }
   }
-  text(ctx, item.id + '  ' + item.material, center - width / 2, lane - height / 2 - 11, '#dae9f6', 13);
+  ctx.closePath();
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+  ctx.strokeStyle = stroke;
+  ctx.stroke();
+}
+
+function drawMaterial(ctx, item, offset, x, y) {
+  const pet = item.material === 'PET';
+  drawFootprint(ctx, item, offset, x, y, pet ? '#81e2fa' : '#ffc78d', pet ? '#217fa0' : '#a96836');
+  text(ctx, item.id + '  ' + item.material, x(item.x + offset - item.length / 2),
+    y(item.y - item.width / 2) - 11, '#dae9f6', 13);
 }
 
 export function drawBelt(canvas, meta, now, pulse, packet, diagnostic) {
   const ctx = canvas.getContext('2d');
   const shift = distanceAt(meta, now);
-  const x = (value) => 48 + (value + 151) * 904 / 631;
-  const y = (value) => 101 + value * 194 / (meta?.beltWidth ?? 240);
-  const scanner = x(meta?.scanX ?? 142);
+  const scanX = meta?.scanX ?? 142;
+  const scale = 194 / (meta?.beltWidth ?? 240);
+  const x = (value) => 468 + (value - scanX) * scale;
+  const y = (value) => 101 + value * scale;
+  const scanner = x(scanX);
   const pulseActive = pulse && now - pulse.t < 0.7;
   const faultActive = diagnostic && now - diagnostic.t < 7;
   const scanColor = faultActive ? colors.amber : colors.cyan;
@@ -88,7 +91,7 @@ export function drawBelt(canvas, meta, now, pulse, packet, diagnostic) {
   ctx.beginPath();
   ctx.roundRect(48, 101, 904, 194, 12);
   ctx.clip();
-  for (let travel = -150 + (shift % 29); travel < 490; travel += 29) {
+  for (let travel = scanX - 580 + (shift % 29); x(travel) < 952; travel += 29) {
     line(ctx, x(travel), 101, x(travel), 295, '#27394c');
   }
   ctx.setLineDash([7, 12]);
@@ -125,6 +128,13 @@ function depthRgb(value) {
   return [Math.round(21 + 75 * strength), Math.round(35 + 179 * strength), Math.round(58 + 119 * strength)];
 }
 
+function previewColor(values, sensor, row) {
+  if (!values.length) return row % 6 < 3 ? [160, 86, 44] : [104, 54, 34];
+  if (sensor === 'rgb') return values.slice(row * 3, row * 3 + 3);
+  if (sensor === 'hsi') return pseudo(values[row]);
+  return depthRgb(values[row]);
+}
+
 export function drawPreview(canvas, rows, sensor, width = 64) {
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#0b1523';
@@ -142,11 +152,7 @@ export function drawPreview(canvas, rows, sensor, width = 64) {
     for (let row = 0; row < width; row++) {
       const rgba = pixels.data;
       const index = (row * columns + col) * 4;
-      let rgb;
-      if (!values.length) rgb = row % 6 < 3 ? [160, 86, 44] : [104, 54, 34];
-      else if (sensor === 'rgb') rgb = values.slice(row * 3, row * 3 + 3);
-      else if (sensor === 'hsi') rgb = pseudo(values[row]);
-      else rgb = depthRgb(values[row]);
+      const rgb = previewColor(values, sensor, row);
       rgb.forEach((channel, i) => rgba[index + i] = channel);
       rgba[index + 3] = 255;
     }
@@ -157,4 +163,49 @@ export function drawPreview(canvas, rows, sensor, width = 64) {
   scratch.getContext('2d').putImageData(pixels, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(scratch, 0, 0, canvas.width, canvas.height);
+}
+
+export function drawAlignedPreview(canvas, samples, sensor, meta, outline) {
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0b1523';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!meta) return;
+  const { scanX, pitch, travel, beltWidth, previewWidth } = meta;
+  const scale = Math.min((canvas.width - 32) / travel, (canvas.height - 32) / beltWidth);
+  const left = (canvas.width - travel * scale) / 2;
+  const top = 8;
+  const origin = scanX - travel;
+  const x = (mm) => left + (mm - origin) * scale;
+  const y = (mm) => top + mm * scale;
+  const step = beltWidth / previewWidth;
+  box(ctx, left, top, travel * scale, beltWidth * scale, 0, '#142237');
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, top, travel * scale, beltWidth * scale);
+  ctx.clip();
+  for (const sample of samples) {
+    if (!sample || !Number.isFinite(sample.displacementMm)) continue;
+    // The fixed scan line intersects this position in the moving belt frame.
+    const center = scanX - sample.displacementMm;
+    const x0 = Math.round(x(center - pitch / 2));
+    const x1 = Math.round(x(center + pitch / 2));
+    for (let row = 0; row < previewWidth; row++) {
+      ctx.fillStyle = `rgb(${previewColor(sample.pixels, sensor, row).join(',')})`;
+      const y0 = Math.round(y(row * step));
+      const y1 = Math.round(y((row + 1) * step));
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+  }
+  if (outline) {
+    ctx.setLineDash([4, 3]);
+    for (const item of meta.objects) drawFootprint(ctx, item, 0, x, y, '#f1f6ff');
+  }
+  ctx.restore();
+  box(ctx, left, top, travel * scale, beltWidth * scale, 0, null, colors.border);
+  text(ctx, `${origin} mm`, left, y(beltWidth) + 17, colors.ink, 12);
+  ctx.textAlign = 'center';
+  text(ctx, '皮带方向 →', canvas.width / 2, y(beltWidth) + 17, colors.ink, 12);
+  ctx.textAlign = 'right';
+  text(ctx, `${scanX} mm`, x(scanX), y(beltWidth) + 17, colors.ink, 12);
+  ctx.textAlign = 'left';
 }

@@ -6,6 +6,23 @@
 #include <cstdint>
 
 namespace waste::m01sim {
+
+std::span<const ProfileStation> footprint(const Material& item) {
+    // Stations run from the trailing end to the leading end of the object.
+    static constexpr std::array pet{
+        ProfileStation{0.00, 0.68}, ProfileStation{0.04, 0.91}, ProfileStation{0.09, 1.00},
+        ProfileStation{0.69, 1.00}, ProfileStation{0.75, 0.93}, ProfileStation{0.85, 0.44},
+        ProfileStation{0.91, 0.44}, ProfileStation{0.92, 0.57}, ProfileStation{0.99, 0.57},
+        ProfileStation{1.00, 0.50},
+    };
+    static constexpr std::array can{
+        ProfileStation{0.00, 0.76}, ProfileStation{0.04, 0.95}, ProfileStation{0.09, 1.00},
+        ProfileStation{0.91, 1.00}, ProfileStation{0.96, 0.95}, ProfileStation{1.00, 0.76},
+    };
+    if (item.kind == "PET") return pet;
+    return can;
+}
+
 namespace {
 
 struct Cut {
@@ -19,10 +36,13 @@ Cut sample(double displacement, double lateral) {
         const auto x = scan_x - item.x - displacement;
         const auto y = lateral - item.y;
         if (std::abs(x) >= item.length / 2) continue;
-        auto width = item.width;
-        if (item.kind == "PET" && x > 0.27 * item.length) {
-            width *= x > 0.37 * item.length ? 0.44 : 0.72;
-        }
+        const auto along = x / item.length + 0.5;
+        const auto profile = footprint(item);
+        const auto right = std::max(profile.begin() + 1,
+            std::ranges::lower_bound(profile, along, {}, &ProfileStation::along));
+        const auto left = right - 1;
+        const auto fraction = (along - left->along) / (right->along - left->along);
+        const auto width = item.width * std::lerp(left->width_fraction, right->width_fraction, fraction);
         const auto edge = (2 * y / width);
         if (std::abs(edge) >= 1) continue;
         return {static_cast<int>(i), item.height * std::sqrt(1 - edge * edge)};
@@ -94,7 +114,7 @@ std::vector<int> preview(const m01::Observation& observation, const Profile& pro
     const auto width = width_for(source, profile);
     std::vector<int> pixels;
     for (unsigned i = 0; i < preview_width; ++i) {
-        const auto column = i * width / preview_width;
+        const auto column = (2 * i + 1) * width / (2 * preview_width);
         const auto base = header.bytes.offset;
         if (source == m01::Source::Rgb) {
             for (unsigned channel = 0; channel < 3; ++channel) {

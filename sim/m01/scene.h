@@ -3,6 +3,7 @@
 #include "m01_acquisition/acquisition_types.h"
 
 #include <array>
+#include <span>
 #include <string_view>
 
 namespace waste::m01sim {
@@ -20,10 +21,16 @@ struct Material {
     double x, y, length, width, height;
 };
 
+struct ProfileStation {
+    double along, width_fraction;
+};
+
 inline constexpr std::array materials{
     Material{"P01", "PET", 18, 80, 94, 48, 48.6},
     Material{"A02", "AL", -117, 166, 67, 39, 31.0},
 };
+
+std::span<const ProfileStation> footprint(const Material& item);
 
 struct Profile {
     unsigned rgb_width{96}, hsi_width{80}, hsi_bands{16}, depth_width{64}, packet_lines{2};
