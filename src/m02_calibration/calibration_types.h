@@ -198,7 +198,7 @@ struct Coverage {
 
 enum class CoverageStatus {
     MissingInput, UnusableInput, UnverifiedTime, ExposureSeparation,
-    UnverifiedCount, ReferenceUnavailable, ProjectionUnavailable, OutOfCoverage, Available
+    UnverifiedCount, ReferenceUnavailable, ProjectionUnavailable, OutOfCoverage, Available, IndependentRoute
 };
 
 struct AlignedTrigger {

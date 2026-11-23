@@ -61,7 +61,14 @@ function displayQuality(row) {
   const entries = [reasons[row.reason] ?? row.reason];
   const quality = row.quality;
   if (quality?.missingTriggers.length) {
-    entries.push('无效行 ' + quality.missingTriggers.map((id) => '#' + id).join('、'));
+    const intervals = [];
+    for (const id of quality.missingTriggers) {
+      const last = intervals.at(-1);
+      if (last && last[1] + 1 === id) last[1] = id;
+      else intervals.push([id, id]);
+    }
+    entries.push('无效行 ' + intervals.map(([first, last]) => first === last ? '#' + first :
+      '#' + first + '–' + last).join('、'));
   }
   for (const [label, key] of [['RGB', 'rgb'], ['HSI', 'hsi']]) {
     const count = quality?.[key];
@@ -178,7 +185,8 @@ export class InferenceView {
     this.lastMeta = meta;
     if (enabled) {
       const masks = meta.m03Mask === 'allow' ? '允许部分缺测' : '要求完整输入';
-      $('inference-config').textContent = '模拟规则 · ' + meta.m03Rows + ' 行窗口 / ' + meta.m03Step +
+      $('inference-config').textContent = '模拟规则 · ' +
+        (meta.layout === 'production' ? '4 帧 · ' : '') + meta.m03Rows + ' 行窗口 / ' + meta.m03Step +
         ' 行步长 · ' + masks + ' · 处理预算 ' + meta.m03BudgetMs + ' ms';
     } else {
       $('inference-config').textContent = meta?.m03Mode === 'off' ? '本次关闭 M03 推理。' :

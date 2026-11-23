@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const statusLabel = {
   available: '有共同覆盖',
+  independent_route: 'RGB 已标定 · HSI 独立',
   missing_input: '缺少一路原始数据',
   unusable_input: '来源质量或触发关联待核',
   unverified_time: '曝光时间无法核实',
@@ -65,7 +66,7 @@ function plot(canvas, row, meta, mode) {
     ctx.fillText(String(mm), x(mm), bounds.b + 22);
   }
   ctx.textAlign = 'right';
-  for (let mm = 0; mm <= beltWidth; mm += 40) {
+  for (let mm = 0; mm <= beltWidth; mm += beltWidth > 400 ? 200 : 40) {
     line(ctx, bounds.l, y(mm), bounds.r, y(mm), colors.grid);
     ctx.fillStyle = colors.tick;
     ctx.fillText(String(mm), bounds.l - 10, y(mm) + 5);
@@ -125,14 +126,16 @@ function temporalTable(row) {
   }
 }
 
-function evidence(row, depth, meta) {
+function evidence(row, depth, meta, hsi) {
   const sample = row?.spectrum;
   $('calibration-spectrum').textContent = sample
     ? [meta?.hsiPreviewBand + ' nm', '列 ' + sample.column, '原始 ' + sample.raw,
         Number.isFinite(sample.corrected) ? '校正 ' + number(sample.corrected, 4) :
           spectralLabel[sample.reason] ?? (sample.reason || '校正待核'),
         sample.reference].join(' · ')
-    : '当前触发无 HSI 样本';
+    : hsi ? '独立帧 ' + hsi.frame + ' · 工位 ' + hsi.scanX + ' mm · 计数 ' + hsi.count +
+      ' · 原始 ' + hsi.raw + ' · 校正 ' + number(hsi.corrected, 4)
+      : meta?.layout === 'production' ? '等待 HSI 独立观测' : '当前触发无 HSI 样本';
 
   const e05 = depth?.observation;
   const points = e05?.measured.filter((point) => point[3] === 'valid');
@@ -154,6 +157,7 @@ export class CalibrationView {
     this.depth = new Map();
     this.latest = null;
     this.latestDepth = null;
+    this.latestHsi = null;
     this.last = null;
   }
 
@@ -164,6 +168,8 @@ export class CalibrationView {
     } else if (type === 'm02-depth') {
       if (data.trigger) this.depth.set(data.trigger, data);
       this.latestDepth = data;
+    } else if (type === 'm02-hsi') {
+      this.latestHsi = data;
     }
   }
 
@@ -174,26 +180,29 @@ export class CalibrationView {
       ((!row || recent?.generation === row.generation) ? recent : null);
     const mode = $('calibration-mode').value;
     if (this.last?.row === row && this.last?.depth === depth && this.last?.selected === selected &&
-        this.last?.meta === meta && this.last?.mode === mode) return;
-    this.last = { row, depth, selected, meta, mode };
+        this.last?.meta === meta && this.last?.mode === mode && this.last?.hsi === this.latestHsi) return;
+    this.last = { row, depth, selected, meta, mode, hsi: this.latestHsi };
     const tag = $('calibration-status');
-    tag.textContent = row ? statusLabel[row.status] ?? row.status : '等待配准';
-    tag.className = 'tag' + (row ? row.coverage ? ' ok' : ' warn' : '');
+    const production = meta?.layout === 'production';
+    tag.textContent = row ? production && row.status === 'missing_input' ? 'RGB 缺行' :
+      statusLabel[row.status] ?? row.status : '等待配准';
+    tag.className = 'tag' + (row ? (row.coverage || row.status === 'independent_route') ? ' ok' : ' warn' : '');
     $('calibration-version').textContent = row
       ? '#' + row.trigger + ' · 世代 ' + row.generation + ' · M01 段 ' + row.segment +
         ' · ' + row.geometry + ' · ' + row.clock
       : selected ? '触发 #' + selected + ' 的 M02 结果尚未回放到。' : '运行后，选中触发即可查看坐标和标定版本。';
 
-    $('calibration-coverage').textContent = row ? '共同覆盖 ' + row.coverage + ' 个 RGB 列 · 曝光时差 ' +
+    $('calibration-coverage').textContent = production ? 'HSI 与深度使用各自的曝光与位移观测。' :
+      row ? '共同覆盖 ' + row.coverage + ' 个 RGB 列 · 曝光时差 ' +
       (Number.isFinite(row.rgb?.exposureMs) && Number.isFinite(row.hsi?.exposureMs)
         ? units(row.hsi.exposureMs - row.rgb.exposureMs, 'ms', 3) : '待核') +
       ' · 上限 ' + units(row.exposureLimitMs, 'ms') : '';
     const basis = row?.hsi?.countBasis;
     $('calibration-ref').textContent = row ? '参考 ' + units(row.referenceMs, 'ms', 3) +
-      ' · 计数 ' + row.referenceCount + ' · HSI 曝光计数 ' +
-      (basis ? number(row.hsi.count) + ' (' + (countBasis[basis] ?? basis) + ')' : '待核') : '';
+      ' · 计数 ' + row.referenceCount + (production ? '' : ' · HSI 曝光计数 ' +
+      (basis ? number(row.hsi.count) + ' (' + (countBasis[basis] ?? basis) + ')' : '待核')) : '';
     temporalTable(row);
     plot($('calibration-map'), row, meta, mode);
-    evidence(row, depth, meta);
+    evidence(row, depth, meta, this.latestHsi);
   }
 }

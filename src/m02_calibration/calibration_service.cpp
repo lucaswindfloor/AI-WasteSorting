@@ -230,10 +230,10 @@ Result CalibrationService::process(std::shared_ptr<const m01::Segment> segment,
                 group.reference_time = sync_time(snapshot, record->event);
             }
             const auto reference = group.reference_time ? std::optional(group.reference_count) : std::nullopt;
-            const auto common = config.routing == m01::Routing::SharedTrigger && valid_reference;
             const auto align_row = [&](const m01::Observation& row, Quality quality, m01::Source expected) {
                 const bool associated = row.header.id.source == expected && row.header.association_verified &&
-                                        row.header.trigger == record->event.key && common;
+                                        row.header.trigger == record->event.key && valid_reference &&
+                                        m01::requires_trigger(config.routing, expected);
                 if (quality == Quality::Valid && !associated) {
                     quality = Quality::Unknown;
                 }
@@ -253,6 +253,8 @@ Result CalibrationService::process(std::shared_ptr<const m01::Segment> segment,
                 } else {
                     group.common_coverage = overlap(snapshot, *group.rgb, *group.hsi, &group.coverage_status);
                 }
+            } else if (config.routing == m01::Routing::RgbTriggered && group.rgb && group.rgb->shift) {
+                group.coverage_status = CoverageStatus::IndependentRoute;
             }
             result.triggers.push_back(std::move(group));
         } else if (const auto* row = std::get_if<m01::Observation>(&item)) {

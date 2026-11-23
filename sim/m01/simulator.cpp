@@ -117,6 +117,7 @@ struct Session {
 };
 
 m03::QueueLimits inference_limits(const Options& opts) {
+    if (opts.production) return {4, 1, 96 * 1024 * 1024};
     if (opts.scenario == Scenario::InferenceOverload) return {2, 1, 32 * 1024 * 1024};
     const auto runners = opts.scenario == Scenario::ModelSwitch ? 4u : opts.inference == InferenceMode::Split ? 2u : 1u;
     return {8, runners, 32 * 1024 * 1024};
@@ -174,11 +175,12 @@ m01::Config settings(const Options& options, unsigned generation, Tick interval)
     const auto base = generation * 10;
     c.sync = {"SYNC-SIM", base, "sim", "", {}, true};
     c.rgb = {"RGB-SIM", base + 1, "sim", "", {"RGB8","packed",p.rgb_width,p.packet_lines,{}, {}, {}}, true};
-    c.hsi = {"HSI-SIM", base + 2, "sim", "", {"U16LE","packed",p.hsi_width,p.packet_lines,
+    const auto hsi_rows = options.production ? 1u : p.packet_lines;
+    c.hsi = {"HSI-SIM", base + 2, "sim", "", {"U16LE","packed",p.hsi_width,hsi_rows,
                                              wavelengths(p.hsi_bands),{}, {}}, true};
     c.e05 = m01::SourceConfig{"E05-SIM", base + 3, "sim", "", {"HEIGHT_F32LE","packed",p.depth_width,1,{},
                                                             "virtual-belt","mm"}, true};
-    const auto longest_packet = std::max(3 * p.rgb_width, 2 * p.hsi_width * p.hsi_bands) * p.packet_lines;
+    const auto longest_packet = std::max(3 * p.rgb_width * p.packet_lines, 2 * p.hsi_width * p.hsi_bands * hsi_rows);
     c.match_timeout = interval * p.packet_lines + Tick(longest_packet * 2) + 3ms;
     c.segment_timeout = 6ms;
     c.source_stale_timeout = 35ms;
@@ -191,6 +193,14 @@ m01::Config settings(const Options& options, unsigned generation, Tick interval)
     c.max_packet_items = p.packet_lines;
     c.buffer_capacity = 100 * 1024 * 1024;
     c.buffer_high_water = 80 * 1024 * 1024;
+    if (options.production) {
+        c.routing = m01::Routing::RgbTriggered;
+        c.match_timeout = interval * p.packet_lines + 45ms;
+        c.segment_timeout = 32ms;
+        c.source_stale_timeout = c.match_timeout + 25ms;
+        c.max_pending = 512;
+        c.max_segment_items = 128;
+    }
     c.contiguous_trigger_ids = true;
     c.first_expected_trigger = 1;
     return c;
@@ -224,9 +234,9 @@ std::string point(const m02::ProjectedPoint& p, std::size_t column) {
 }
 
 template<class Format>
-std::string sample_columns(std::size_t width, Format format) {
+std::string sample_columns(std::size_t width, Format format, std::size_t display_columns = preview_width) {
     std::vector<std::size_t> columns;
-    const auto limit = std::min<std::size_t>(width, preview_width);
+    const auto limit = std::min(width, display_columns);
     for (std::size_t i = 0; i < limit; ++i) columns.push_back((2 * i + 1) * width / (2 * limit));
     return array(columns, format);
 }
@@ -240,10 +250,10 @@ std::string_view count_name(m02::CountBasis basis) {
     return {};
 }
 
-std::string describe_alignment(const m02::AlignedObservation* row) {
+std::string describe_alignment(const m02::AlignedObservation* row, std::size_t display_columns = preview_width) {
     if (!row) return "null";
     const auto data = [&](const auto& pixels) {
-        return sample_columns(pixels.size(), [&](auto i) { return point(pixels[i], i); });
+        return sample_columns(pixels.size(), [&](auto i) { return point(pixels[i], i); }, display_columns);
     };
     const auto& identity = row->source.header.id;
     return object({{"frame", std::to_string(identity.frame)}, {"row", std::to_string(identity.row)},
@@ -298,7 +308,14 @@ SpectralSample spectral_sample(const m02::AlignedObservation& row, unsigned widt
 class Simulation {
 public:
     explicit Simulation(const Options& options)
-        : opts_(options), interval_(1500000000LL / opts_.speed_mm_s),
+        : opts_(options), layout_(options.production ? production_layout : demo_layout),
+          interval_(static_cast<Tick::rep>(layout_.pitch * 1000000000 / opts_.speed_mm_s)),
+          hsi_step_(opts_.production ? (opts_.speed_mm_s + 199) / 200 : 1),
+          window_rows_(opts_.production ? production_window_rows : inference_rows),
+          window_step_(opts_.production ? production_frame_rows : inference_step),
+          budget_(opts_.production ?
+              interval_ * static_cast<Tick::rep>((layout_.pick_begin - layout_.rgb_x) / layout_.pitch) - 200ms :
+              inference_budget),
           routes_(inference_routes(opts_.inference)),
           m03_(8, 2, inference_limits(opts_)),
           archive_(opts_.output / "archive"),
@@ -308,7 +325,11 @@ public:
 
 private:
     const Options& opts_;
+    const Layout& layout_;
     Tick interval_;
+    unsigned hsi_step_;
+    std::size_t window_rows_, window_step_;
+    Tick budget_;
     m01::AcquisitionService acq_;
     m02::CalibrationService m02_;
     const std::vector<m03::Route> routes_;
@@ -328,7 +349,8 @@ private:
     std::vector<Session> sessions_;
     std::vector<Trace> trace_;
     std::map<unsigned, Row> ledger_;
-    std::vector<SeenDepth> depth_;
+    std::vector<SeenDepth> depth_, independent_hsi_;
+    unsigned calibrated_hsi_{};
     std::map<m01::Issue, unsigned> diagnostics_;
     std::deque<PendingArchive> pending_;
     std::vector<std::string> errors_;
@@ -358,6 +380,13 @@ private:
     void check(bool value, std::string problem);
     bool missing(unsigned id) const;
     bool late(unsigned id) const;
+    bool rgb_missing(unsigned id) const {
+        return opts_.scenario == Scenario::RgbFrameLoss && id > 384 && id <= 512;
+    }
+    double scan_at(Source source) const {
+        if (source == Source::E05) return layout_.depth_x;
+        return source == Source::Hsi ? hsi_scan_position(layout_, opts_.scenario, interval_) : layout_.rgb_x;
+    }
 };
 
 bool Simulation::missing(unsigned id) const {
@@ -378,7 +407,7 @@ void Simulation::check(bool value, std::string problem) {
 }
 
 void Simulation::run_session(const Session& session, const Session* previous) {
-    const auto snapshot = calibration(session.config, opts_.scenario, interval_);
+    const auto snapshot = calibration(session.config, layout_, opts_.scenario, interval_);
     m02_.install(snapshot);
     sync_window_.clear();
     acq_.start(session.config, session.start);
@@ -403,7 +432,8 @@ void Simulation::run_session(const Session& session, const Session* previous) {
         std::vector<unsigned> rgb, hsi;
         for (auto local = first; local <= last; ++local) {
             const auto global = session.base + local;
-            rgb.push_back(local);
+            if (!rgb_missing(global)) rgb.push_back(local);
+            if (opts_.production) continue;
             if (late(global)) {
                 const auto actual = session.start + local * interval_;
                 events.push_back({actual + session.config.match_timeout + 4ms, actual, Input::Hsi, {local}});
@@ -411,10 +441,10 @@ void Simulation::run_session(const Session& session, const Session* previous) {
                 hsi.push_back(local);
             }
         }
-        const auto rgb_delay = 520us + Tick(rgb.size() * opts_.profile.rgb_width * 6);
+        const auto rgb_delay = 520us + Tick(rgb.size() * opts_.profile.rgb_width * (opts_.production ? 30 : 6));
         const auto hsi_delay = ((first - 1) / group_size % 2 == 0 ? 160us : 900us) +
                               Tick(hsi.size() * opts_.profile.hsi_width * opts_.profile.hsi_bands * 4);
-        events.push_back({exposed + rgb_delay, exposed, Input::Rgb, std::move(rgb)});
+        if (!rgb.empty()) events.push_back({exposed + rgb_delay, exposed, Input::Rgb, std::move(rgb)});
         if (!hsi.empty()) {
             const auto hsi_exposed = exposure_at(session, Source::Hsi, last);
             auto arrival = hsi_exposed + hsi_delay + hsi_transport_delay(opts_.scenario);
@@ -422,6 +452,13 @@ void Simulation::run_session(const Session& session, const Session* previous) {
                 arrival = std::max(arrival, session.start + 101 * interval_ + 351us);
             }
             events.push_back({arrival, hsi_exposed, Input::Hsi, std::move(hsi)});
+        }
+    }
+    if (opts_.production) {
+        for (unsigned local = hsi_step_; local <= session.count; local += hsi_step_) {
+            const auto exposed = exposure_at(session, Source::Hsi, local);
+            const auto transport = 520us + Tick(2 * opts_.profile.hsi_width * opts_.profile.hsi_bands * 10);
+            events.push_back({exposed + transport, exposed, Input::Hsi, {local}, local / hsi_step_});
         }
     }
     if (opts_.depth == DepthMode::Independent) {
@@ -456,7 +493,7 @@ void Simulation::run_session(const Session& session, const Session* previous) {
 
 double Simulation::displacement(const Session& session, Tick exposure) const {
     const auto steps = static_cast<double>((exposure - session.start).count()) / interval_.count();
-    return (session.base + steps) * pitch_mm;
+    return (session.base + steps) * layout_.pitch;
 }
 
 Tick Simulation::exposure_at(const Session& session, Source source, unsigned local) const {
@@ -472,11 +509,11 @@ void Simulation::deliver(const Session& session, const Event& event) {
     }
     if (event.input == Input::Encoder || event.input == Input::Sync) {
         const auto local = event.lines.front();
-        const auto count = local * encoder_counts_per_line;
+        const auto count = local * layout_.encoder_step();
         if (event.input == Input::Encoder) {
             log(event.at, "trigger", object({{"trigger", std::to_string(session.base + local)},
                 {"local", std::to_string(local)}, {"count", std::to_string(count)},
-                {"distance", std::to_string((session.base + local) * pitch_mm)},
+                {"distance", std::to_string((session.base + local) * layout_.pitch)},
                 {"generation", std::to_string(conf.generation)}, {"epoch", std::to_string(conf.encoder_epoch)}}));
         } else {
             const m01::SyncInput sync{conf.generation, {trigger_key(session, local), count, 1,
@@ -496,25 +533,26 @@ void Simulation::deliver(const Session& session, const Event& event) {
     std::vector<std::byte> bytes;
     std::vector<unsigned> triggers;
     const auto depth = source == Source::E05;
+    const auto hsi_independent = opts_.production && source == Source::Hsi;
     const auto lane = depth ? std::vector{event.lines.empty() ? 0u : event.lines.front()} : event.lines;
     for (auto local : lane) {
         const auto acquired = depth || event.old ? event.exposure : exposure_at(session, source, local);
-        const auto scan_at = source == Source::Hsi ? hsi_scan_position(opts_.scenario, interval_) : scan_x;
-        auto signal = scan(source, opts_.profile, displacement(session, acquired),
-                           depth && event.frame % 7 == 0, scan_at);
+        auto signal = scan(source, opts_.profile, layout_, displacement(session, acquired),
+                           depth && event.frame % 7 == 0, scan_at(source));
         m01::ObservationHeader h;
         h.id = depth ? m01::ObservationId{source, device.session, 8000 + event.frame, 0}
-                     : id_for(session, source, local);
-        if (local) {
+                     : hsi_independent ? m01::ObservationId{source, device.session, 399 + event.frame, 0}
+                                       : id_for(session, source, local);
+        if (local && !hsi_independent) {
             h.trigger = trigger_key(session, local);
             h.association_verified = true;
             triggers.push_back(session.base + local);
         }
         h.source_time = m01::SourceTime{device.device_id + "-clock", (acquired + clock_offset(source)).count()};
         h.time_basis = exposure_basis;
-        if (source != Source::Hsi || hsi_has_native_count(opts_.scenario, session.base + local)) {
+        if (source != Source::Hsi || (opts_.production || hsi_has_native_count(opts_.scenario, session.base + local))) {
             const auto steps = static_cast<double>((acquired - session.start).count()) / interval_.count();
-            h.encoder_count = std::llround(steps * encoder_counts_per_line);
+            h.encoder_count = std::llround(steps * layout_.encoder_step());
             h.encoder_epoch = conf.encoder_epoch;
         }
         h.bytes = {bytes.size(), signal.data_bytes};
@@ -555,7 +593,7 @@ void Simulation::accept(Tick now, m01::Output output) {
                     p->hsi ? std::optional(p->hsi->received) : std::nullopt, p->rgb_quality, p->hsi_quality};
                 check(ledger_.emplace(global, row).second, "duplicate M01 result for trigger " + std::to_string(global));
                 log(now, "result", object({{"trigger", std::to_string(global)}, {"local", std::to_string(local)},
-                    {"displacementMm", std::to_string(global * pitch_mm)},
+                    {"displacementMm", std::to_string(global * layout_.pitch)},
                     {"hsiDisplacementMm", std::to_string(displacement(session, exposure_at(session, Source::Hsi, local)))},
                     {"count", std::to_string(row.count)}, {"generation", std::to_string(row.generation)},
                     {"segment", std::to_string(row.segment)}, {"syncReceivedMs", time(p->received)},
@@ -563,6 +601,14 @@ void Simulation::accept(Tick now, m01::Output output) {
                     {"rgb", describe_row(p->rgb)}, {"hsi", describe_row(p->hsi)},
                     {"rgbPixels", p->rgb ? integers(preview(*p->rgb, opts_.profile)) : "[]"},
                     {"hsiPixels", p->hsi ? integers(preview(*p->hsi, opts_.profile)) : "[]"}}));
+            }
+            if (const auto* d = std::get_if<m01::Observation>(&item); d && d->header.id.source == Source::Hsi) {
+                const auto local = (d->header.id.frame - 399) * hsi_step_;
+                const auto distance = (session.base + local) * layout_.pitch;
+                independent_hsi_.push_back({d->header.id, distance, false, 0, 0});
+                log(now, "hsi-independent", object({{"frame", std::to_string(d->header.id.frame)},
+                    {"session", std::to_string(d->header.id.session)}, {"displacementMm", decimal(distance)},
+                    {"receivedMs", time(d->received)}, {"pixels", integers(preview(*d, opts_.profile))}}));
             }
             if (const auto* d = std::get_if<m01::Observation>(&item); d && d->header.id.source == Source::E05) {
                 const auto pixels = preview(*d, opts_.profile);
@@ -576,7 +622,7 @@ void Simulation::accept(Tick now, m01::Output output) {
                       (expected_mask == d->header.valid_mask.has_value()) &&
                       ((opts_.depth == DepthMode::Encoder && linked && (linked - session.base) % 8 == 0) ||
                        (opts_.depth == DepthMode::Independent && !linked)), "M01 E05 timing or validity mismatched");
-                const auto displacement = (session.base + steps) * pitch_mm;
+                const auto displacement = (session.base + steps) * layout_.pitch;
                 depth_.push_back({d->header.id, displacement, expected_mask, zero, mask});
                 log(now, "depth", object({{"frame", std::to_string(d->header.id.frame)},
                     {"session", std::to_string(d->header.id.session)}, {"trigger", std::to_string(linked)},
@@ -637,7 +683,7 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
                 check(rgb && rgb->time && hsi->time && hsi->time->value - rgb->time->value == delay,
                       "M02 exposure time mismatch for trigger " + std::to_string(global));
                 if (opts_.scenario != Scenario::CountInterpolation || global != trigger_count) {
-                    const auto expected_shift = -pitch_mm * delay.count() / interval_.count();
+                    const auto expected_shift = -layout_.pitch * delay.count() / interval_.count();
                     check(hsi->shift && std::abs(hsi->shift->mm - expected_shift) <= 0.026,
                           "M02 along-belt shift mismatch for trigger " + std::to_string(global));
                 }
@@ -655,9 +701,22 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
             {"referenceCount", decimal(static_cast<double>(group.reference_count.value))},
             {"exposureLimitMs", time(result.snapshot->max_exposure_separation)},
             {"status", quote(name(group.coverage_status))}, {"coverage", std::to_string(group.common_coverage.size())},
-            {"rgb", describe_alignment(rgb)}, {"hsi", describe_alignment(hsi)}, {"pairs", pairs}, {"spectrum", spectrum}}));
+            {"rgb", describe_alignment(rgb, opts_.production ? 16 : preview_width)},
+            {"hsi", describe_alignment(hsi)}, {"pairs", pairs}, {"spectrum", spectrum}}));
     }
     for (const auto& row : result.independent) {
+        if (row.source.header.id.source == Source::Hsi) {
+            const auto sample = spectral_sample(row, opts_.profile.hsi_width, opts_.profile.hsi_bands);
+            check(row.time && row.count && sample.corrected && !row.measured.empty() &&
+                  row.measured.front().position.x == layout_.hsi_x, "independent HSI calibration mismatch");
+            if (sample.corrected) ++calibrated_hsi_;
+            log(now, "m02-hsi", object({{"frame", std::to_string(row.source.header.id.frame)},
+                {"count", row.count ? decimal(row.count->value) : "null"},
+                {"exposureMs", row.time ? time(row.time->value) : "null"},
+                {"scanX", decimal(layout_.hsi_x)}, {"reference", quote(versions.spectral_reference)},
+                {"raw", std::to_string(sample.raw)},
+                {"corrected", sample.corrected ? decimal(*sample.corrected) : "null"}}));
+        }
         if (row.source.header.id.source != Source::E05) continue;
         const auto count = [&](auto predicate) { return std::ranges::count_if(row.measured, predicate); };
         const auto zeros = count([](const auto& p) { return p.quality == m02::Quality::Valid && p.position.z == 0; });
@@ -674,11 +733,11 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
             {"zeros", std::to_string(zeros)}, {"masked", std::to_string(masked)}, {"observation", describe_alignment(&row)}}));
     }
     if (!routes_.empty() && (!result.triggers.empty() || !result.acquisition_diagnostics.empty())) {
-        auto deadline = now + inference_budget;
+        auto deadline = now + budget_;
         for (const auto& trigger : result.triggers) {
             const auto reference = trigger.reference_time ? trigger.reference_time->value :
                 session.start + interval_ * static_cast<Tick::rep>(trigger.source.event.key.id);
-            deadline = std::min(deadline, reference + inference_budget);
+            deadline = std::min(deadline, reference + budget_);
         }
         auto report = m03_.ingest(std::make_shared<m02::Result>(std::move(result)), now, deadline);
         record_inference(now, std::move(report));
@@ -705,7 +764,7 @@ void Simulation::activate_inference(const Session& session, const m02::Snapshot&
     SimulationBackend backend(delay);
     m03::Activation activation{session.config.first_expected_trigger.value(), {}};
     for (auto route : routes_) {
-        auto manifest = inference_manifest(route, session.config, snapshot, std::to_string(generation), opts_.allow_masks);
+        auto manifest = inference_manifest(route, session.config, snapshot, std::to_string(generation), opts_.allow_masks, window_rows_, window_step_, budget_);
         const auto identity = manifest.identity;
         activation.models.push_back(identity.key);
         m03_.install(std::move(manifest), inference_artifact(identity.key.version), backend);
@@ -717,8 +776,8 @@ void Simulation::activate_inference(const Session& session, const m02::Snapshot&
 }
 
 void Simulation::reject_candidate(const Session& next, Tick now) {
-    const auto snapshot = calibration(next.config, opts_.scenario, interval_);
-    auto candidate = inference_manifest(routes_.back(), next.config, snapshot, "candidate", opts_.allow_masks);
+    const auto snapshot = calibration(next.config, layout_, opts_.scenario, interval_);
+    auto candidate = inference_manifest(routes_.back(), next.config, snapshot, "candidate", opts_.allow_masks, window_rows_, window_step_, budget_);
     if (candidate.hsi) std::swap(candidate.hsi->bands[0], candidate.hsi->bands[1]);
     else ++candidate.raster.left;
     const auto identity = candidate.identity;
@@ -737,7 +796,7 @@ void Simulation::reject_candidate(const Session& next, Tick now) {
     check(m03_.unload(identity.key), "M03 could not unload the rejected candidate");
 }
 
-std::string inference_evidence(const m03::Evidence& evidence, const Session& session) {
+std::string inference_evidence(const m03::Evidence& evidence, const Session& session, const Layout& layout) {
     const auto source = [&](Source sensor) {
         const auto first = std::ranges::find_if(evidence.samples, [&](const auto& sample) {
             return sample.source.observation.source == sensor;
@@ -755,7 +814,7 @@ std::string inference_evidence(const m03::Evidence& evidence, const Session& ses
     std::optional<std::array<double, 4>> bounds;
     for (const auto& sample : evidence.samples) {
         if (!sample.count) continue;
-        const auto distance = (session.base + sample.count->value / encoder_counts_per_line) * pitch_mm;
+        const auto distance = (session.base + sample.count->value / layout.encoder_step()) * layout.pitch;
         const auto x = sample.belt.position.x - static_cast<double>(distance);
         const auto y = sample.belt.position.y;
         if (!bounds) bounds = std::array{x, y, x, y};
@@ -805,7 +864,7 @@ void Simulation::record_inference(Tick now, m03::Report report) {
             {"backendMs", time(result.backend_completed)}, {"finishedMs", time(result.finished)},
             {"deadlineMs", result.deadline == Tick{} || result.deadline == Tick::max() ? "null" : time(result.deadline)},
             {"quality", input}, {"evidence", array(result.evidence, [&](const auto& evidence) {
-                return inference_evidence(evidence, session);
+                return inference_evidence(evidence, session, layout_);
             })}}));
     }
     const auto health = m03_.health();
@@ -887,7 +946,7 @@ Report Simulation::verify() {
     if (!routes_.empty()) {
         std::size_t complete_windows = 0;
         for (const auto& session : sessions_) {
-            complete_windows += (1 + (session.count - inference_rows) / inference_step) * routes_.size();
+            complete_windows += (1 + (session.count - window_rows_) / window_step_) * routes_.size();
         }
         check(out.detected_windows + out.empty_windows + out.invalid_windows + out.expired_windows +
               out.full_windows == complete_windows, "M03 lost or added complete windows");
@@ -900,14 +959,19 @@ Report Simulation::verify() {
     const auto health = acq_.health();
     check(!health.payload_bytes && !health.inflight_segments && !health.pending && pending_.empty(),
           "M01 buffers were not released");
-    check(ledger_.size() == trigger_count, "unexpected number of unique M01 trigger records");
+    check(ledger_.size() == layout_.lines, "unexpected number of unique M01 trigger records");
     check(depth_.size() == depth_expected_, "E05 sample count mismatched");
     out.depth = static_cast<unsigned>(depth_.size());
+    out.independent_hsi = static_cast<unsigned>(independent_hsi_.size());
+    if (opts_.production) {
+        check(out.independent_hsi == layout_.lines / hsi_step_ && calibrated_hsi_ == out.independent_hsi,
+              "independent HSI observations lost between M01 and M02");
+    }
     out.calibrated = static_cast<unsigned>(coverage_.size());
     out.covered = std::ranges::count_if(coverage_, [](const auto& trigger) {
         return trigger.second == m02::CoverageStatus::Available;
     });
-    check(out.calibrated == trigger_count, "unexpected number of M02 trigger results");
+    check(out.calibrated == layout_.lines, "unexpected number of M02 trigger results");
     check(projected_depth_ == depth_expected_ && e05_zero_points_ && e05_masked_points_,
           "M02 E05 projections, valid zeros or masks were lost");
     out.late = diagnostics_[m01::Issue::Late];
@@ -944,9 +1008,8 @@ Report Simulation::verify() {
         const auto found = index.native.find({device.device_id, std::to_string(id.session), id.frame, id.row});
         if (found == index.native.end() || found->second.size() != 1) return false;
         const auto read = archive_.raw(manifest, found->second.front());
-        const auto scan_at = source == Source::Hsi ? hsi_scan_position(opts_.scenario, interval_) : scan_x;
-        const auto expected = scan(source, opts_.profile, displacement(session, exposure_at(session, source, local)),
-                                   false, scan_at);
+        const auto expected = scan(source, opts_.profile, layout_, displacement(session, exposure_at(session, source, local)),
+                                   false, scan_at(source));
         if (!read.value || *read.value != expected.bytes) return false;
         ++out.verified;
         return true;
@@ -957,7 +1020,7 @@ Report Simulation::verify() {
             check(archived_triggers.emplace(key.id, &record).second, "duplicate trigger within archive");
         }
     }
-    check(archived_triggers.size() == trigger_count, "unexpected number of M09 trigger records");
+    check(archived_triggers.size() == layout_.lines, "unexpected number of M09 trigger records");
 
     for (const auto& session : sessions_) {
         for (unsigned local = 1; local <= session.count; ++local) {
@@ -971,11 +1034,17 @@ Report Simulation::verify() {
                 continue;
             }
             const auto& actual = found->second;
-            check(actual.count == static_cast<std::uint64_t>(local * encoder_counts_per_line) &&
+            const auto missing_rgb = rgb_missing(global);
+            check(actual.count == static_cast<std::uint64_t>(local * layout_.encoder_step()) &&
                   actual.generation == session.config.generation &&
-                  actual.rgb == id_for(session, Source::Rgb, local) && actual.rgb_quality == m01::Quality::Valid,
+                  (missing_rgb ? !actual.rgb && actual.rgb_quality == m01::Quality::Missing :
+                     actual.rgb == id_for(session, Source::Rgb, local) && actual.rgb_quality == m01::Quality::Valid),
                   "M01 RGB/encoder association mismatched" + label);
-            if (drop || delayed) {
+            if (!missing_rgb) ++out.rgb_rows;
+            if (opts_.production) {
+                check(!actual.hsi && actual.hsi_quality == m01::Quality::Unknown, "HSI incorrectly attached to RGB");
+                if (missing_rgb) ++out.missing;
+            } else if (drop || delayed) {
                 check(!actual.hsi && actual.hsi_quality == m01::Quality::Missing, "M01 HSI gap mismatched" + label);
             } else {
                 check(actual.hsi == id_for(session, Source::Hsi, local) && actual.hsi_quality == m01::Quality::Valid,
@@ -986,36 +1055,47 @@ Report Simulation::verify() {
 
             using enum m02::CoverageStatus;
             auto expected = Available;
-            if (drop || delayed) expected = MissingInput;
+            if (opts_.production) expected = missing_rgb ? MissingInput : IndependentRoute;
+            else if (drop || delayed) expected = MissingInput;
             else if (opts_.scenario == Scenario::ClockMissing) expected = UnverifiedTime;
             else if (opts_.scenario == Scenario::ExposureLimit) expected = ExposureSeparation;
             else if (opts_.scenario == Scenario::ExposureDelay) expected = OutOfCoverage;
-            else if (opts_.scenario == Scenario::CountInterpolation && global == trigger_count) expected = UnverifiedCount;
+            else if (opts_.scenario == Scenario::CountInterpolation && global == layout_.lines) expected = UnverifiedCount;
             const auto status = coverage_.find(global);
             check(status != coverage_.end() && status->second == expected, "M02 common coverage mismatch" + label);
 
             const auto key = m09::capture_trigger_id(trigger_key(session, local));
             const auto saved = archived_triggers.find(key);
-            check(saved != archived_triggers.end() && saved->second->raw.size() == (drop || delayed ? 1u : 2u) &&
+            check(saved != archived_triggers.end() && saved->second->raw.size() == (opts_.production ? (missing_rgb ? 0u : 1u) : drop || delayed ? 1u : 2u) &&
                   saved->second->epoch == actual.generation && actual.archive_version != 0,
                   "M09 trigger references mismatched" + label);
-            check(verify_lane(session, Source::Rgb, local), "M09 RGB bytes mismatched" + label);
-            if (!drop) check(verify_lane(session, Source::Hsi, local), "M09 HSI bytes mismatched" + label);
+            if (!missing_rgb) check(verify_lane(session, Source::Rgb, local), "M09 RGB bytes mismatched" + label);
+            if (!opts_.production && !drop) check(verify_lane(session, Source::Hsi, local), "M09 HSI bytes mismatched" + label);
         }
     }
     for (const auto& d : depth_) {
         const auto found = index.native.find({"E05-SIM", std::to_string(d.id.session), d.id.frame, d.id.row});
         const auto read = found != index.native.end() && found->second.size() == 1
                         ? archive_.raw(manifest, found->second.front()) : m09::Result<m09::Bytes>{};
-        const auto expected = scan(Source::E05, opts_.profile, d.distance, d.expected_mask);
+        const auto expected = scan(Source::E05, opts_.profile, layout_, d.distance, d.expected_mask, layout_.depth_x);
         check(read.value && *read.value == expected.bytes, "M09 E05 bytes mismatched for frame " +
               std::to_string(d.id.frame));
         if (read.value && *read.value == expected.bytes) ++out.verified;
     }
+    for (const auto& row : independent_hsi_) {
+        const auto found = index.native.find({"HSI-SIM", std::to_string(row.id.session), row.id.frame, 0});
+        const auto read = found != index.native.end() && found->second.size() == 1
+                        ? archive_.raw(manifest, found->second.front()) : m09::Result<m09::Bytes>{};
+        const auto expected = scan(Source::Hsi, opts_.profile, layout_, row.distance, false, layout_.hsi_x);
+        check(read.value && *read.value == expected.bytes, "independent HSI bytes mismatched");
+        if (read.value && *read.value == expected.bytes) ++out.verified;
+    }
     check(manifest.gaps.size() == out.missing, "M09 gap count mismatched");
     for (const auto& gap : manifest.gaps) {
-        check(gap.source == "HSI-SIM" && gap.basis == "trigger" && gap.range.end == gap.range.begin + 1 &&
-              (missing(static_cast<unsigned>(gap.range.begin)) || late(static_cast<unsigned>(gap.range.begin))),
+        const auto trigger = static_cast<unsigned>(gap.range.begin);
+        const auto expected = opts_.production ? gap.source == "RGB-SIM" && rgb_missing(trigger) :
+            gap.source == "HSI-SIM" && (missing(trigger) || late(trigger));
+        check(expected && gap.basis == "trigger" && gap.range.end == gap.range.begin + 1,
               "M09 recorded a gap for the wrong source or trigger");
     }
 
@@ -1036,9 +1116,10 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"retired", std::to_string(inference_counts_[m03::State::Retired])},
         {"rejectedModels", std::to_string(rejected_models_)}, {"peakWaiting", std::to_string(peak_inference_waiting_)},
         {"peakRunning", std::to_string(peak_inference_running_)}, {"peakBytes", std::to_string(peak_inference_bytes_)}});
-    const auto summary = object({{"passed", yes(report.passed)}, {"expected", std::to_string(trigger_count)},
+    const auto summary = object({{"passed", yes(report.passed)}, {"expected", std::to_string(layout_.lines)},
         {"finalized", std::to_string(ledger_.size())}, {"paired", std::to_string(report.paired)},
         {"missing", std::to_string(report.missing)}, {"late", std::to_string(report.late)},
+        {"rgbRows", std::to_string(report.rgb_rows)}, {"independentHsi", std::to_string(report.independent_hsi)},
         {"rejectedOld", std::to_string(diagnostics_[m01::Issue::OldGeneration])},
         {"depth", std::to_string(report.depth)}, {"segments", std::to_string(archive_count_)},
         {"manifest", std::to_string(version)}, {"archiveGaps", std::to_string(gaps)},
@@ -1047,21 +1128,24 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"m03", routes_.empty() ? "null" : m03_summary},
         {"errors", array(errors_, [](const auto& error) { return quote(error); })}});
     const auto meta = object({{"scenario", quote(name(opts_.scenario))}, {"speed", std::to_string(opts_.speed_mm_s)},
-        {"pitch", std::to_string(pitch_mm)}, {"depthMode", quote(opts_.depth == DepthMode::Encoder ? "encoder" : "independent")},
+        {"layout", quote(opts_.production ? "production" : "demo")}, {"pitch", decimal(layout_.pitch)}, {"depthMode", quote(opts_.depth == DepthMode::Encoder ? "encoder" : "independent")},
         {"m03Mode", quote(name(opts_.inference))}, {"m03Mask", quote(opts_.allow_masks ? "allow" : "strict")},
-        {"m03Rows", std::to_string(inference_rows)}, {"m03Step", std::to_string(inference_step)},
-        {"m03BudgetMs", time(inference_budget)},
-        {"durationMs", time(latest_)}, {"beltWidth", std::to_string(belt_width)}, {"scanX", std::to_string(scan_x)},
-        {"hsiScanX", std::to_string(hsi_scan_position(opts_.scenario, interval_))},
-        {"travel", std::to_string(travel)}, {"previewWidth", std::to_string(preview_width)},
-        {"previewTravel", decimal(travel + pitch_mm * hsi_exposure_delay(opts_.scenario, interval_).count() / interval_.count())},
+        {"m03Rows", std::to_string(window_rows_)}, {"m03Step", std::to_string(window_step_)},
+        {"m03BudgetMs", time(budget_)},
+        {"durationMs", time(latest_)}, {"beltWidth", decimal(layout_.width)}, {"scanX", decimal(layout_.rgb_x)},
+        {"beltLength", decimal(layout_.length)}, {"depthScanX", decimal(layout_.depth_x)},
+        {"pickBegin", decimal(layout_.pick_begin)}, {"pickEnd", decimal(layout_.pick_end)},
+        {"hsiPitch", decimal(hsi_step_ * layout_.pitch)},
+        {"hsiScanX", std::to_string(scan_at(Source::Hsi))},
+        {"travel", decimal(layout_.lines * layout_.pitch)}, {"previewWidth", std::to_string(preview_width)},
+        {"previewTravel", decimal(layout_.lines * layout_.pitch + layout_.pitch * hsi_exposure_delay(opts_.scenario, interval_).count() / interval_.count())},
         {"rgbWidth", std::to_string(p.rgb_width)}, {"hsiWidth", std::to_string(p.hsi_width)},
         {"hsiBands", std::to_string(p.hsi_bands)}, {"depthWidth", std::to_string(p.depth_width)},
         {"hsiPreviewBand", quote(wavelengths(p.hsi_bands)[p.hsi_bands / 2])},
         {"packetLines", std::to_string(p.packet_lines)},
-        {"objects", array(materials, [](const Material& item) {
+        {"objects", array(layout_.objects, [](const Material& item) {
             return object({{"id", quote(item.id)}, {"material", quote(item.kind)}, {"x", std::to_string(item.x)},
-                {"y", std::to_string(item.y)}, {"length", std::to_string(item.length)}, {"width", std::to_string(item.width)},
+                {"y", std::to_string(item.y)}, {"length", std::to_string(item.length)}, {"width", std::to_string(item.width)}, {"height", decimal(item.height)},
                 {"footprint", array(footprint(item), [](const ProfileStation& station) {
                     return "[" + std::to_string(station.along) + "," + std::to_string(station.width_fraction) + "]";
                 })}});
@@ -1069,7 +1153,7 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"motion", array(sessions_, [&](const Session& session) {
             const auto stop = exposure_at(session, Source::Hsi, session.count);
             return object({{"startMs", time(session.start)}, {"endMs", time(stop)},
-                {"begin", std::to_string(session.base * pitch_mm)}, {"end", decimal(displacement(session, stop))}});
+                {"begin", std::to_string(session.base * layout_.pitch)}, {"end", decimal(displacement(session, stop))}});
         })}});
     std::ofstream data(opts_.output / "report.json", std::ios::binary);
     data << "{\"schema\":1,\"meta\":" << meta << ",\"events\":[\n";
@@ -1106,17 +1190,17 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
 Report Simulation::execute() {
     if (opts_.scenario == Scenario::Reconnect || opts_.scenario == Scenario::ModelSwitch) {
         auto one = settings(opts_, 1, interval_);
-        const auto count = trigger_count / 2;
+        const auto count = layout_.lines / 2;
         const auto next = interval_ * count + one.match_timeout + 20ms;
         sessions_.push_back({0, count, 0ns, std::move(one)});
-        sessions_.push_back({count, trigger_count - count, next, settings(opts_, 2, interval_)});
+        sessions_.push_back({count, layout_.lines - count, next, settings(opts_, 2, interval_)});
     } else {
-        sessions_.push_back({0, trigger_count, 0ns, settings(opts_, 1, interval_)});
+        sessions_.push_back({0, layout_.lines, 0ns, settings(opts_, 1, interval_)});
     }
     for (std::size_t i = 0; i < sessions_.size(); ++i) {
         run_session(sessions_[i], i ? &sessions_[i - 1] : nullptr);
     }
-    const auto drained_by = inference_now_ + 3 * inference_budget;
+    const auto drained_by = inference_now_ + 3 * budget_;
     while (m03_.health().retained_bytes && inference_now_ < drained_by) {
         advance_inference(inference_now_ + 1ms);
     }
@@ -1148,11 +1232,20 @@ std::string_view name(Scenario scenario) {
     case Scenario::InvalidWhite: return "invalid-white";
     case Scenario::InferenceOverload: return "inference-overload";
     case Scenario::ModelSwitch: return "model-switch";
+    case Scenario::RgbFrameLoss: return "rgb-frame-loss";
     }
     return {};
 }
 
 Report run(const Options& options) {
+    if (options.production && (options.speed_mm_s < 1000 || options.speed_mm_s > 3000 ||
+        (options.scenario != Scenario::Normal && options.scenario != Scenario::RgbFrameLoss) ||
+        (options.inference != InferenceMode::Rgb && options.inference != InferenceMode::Off))) {
+        throw std::invalid_argument("production uses normal or rgb-frame-loss, RGB/off, and 1000–3000 mm/s");
+    }
+    if (!options.production && options.scenario == Scenario::RgbFrameLoss) {
+        throw std::invalid_argument("rgb-frame-loss requires the production layout");
+    }
     if (options.output.has_parent_path()) std::filesystem::create_directories(options.output.parent_path());
     if (!std::filesystem::create_directory(options.output)) {
         throw std::runtime_error("output directory exists; choose a new path");

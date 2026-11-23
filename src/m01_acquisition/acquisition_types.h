@@ -17,7 +17,12 @@ using Tick = std::chrono::nanoseconds;
 
 enum class Source { Sync, Rgb, Hsi, E05 };
 enum class Quality { Valid, Missing, Invalid, Stale, Unknown };
-enum class Routing { SharedTrigger, Independent };
+enum class Routing { SharedTrigger, Independent, RgbTriggered };
+
+constexpr bool requires_trigger(Routing routing, Source source) {
+    return source == Source::Rgb ? routing != Routing::Independent :
+           source == Source::Hsi && routing == Routing::SharedTrigger;
+}
 
 struct SourceTime {
     std::string clock_domain;

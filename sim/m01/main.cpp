@@ -23,7 +23,7 @@ Scenario scenario(std::string_view value) {
                         Scenario::SlowArchive, Scenario::Reconnect, Scenario::TransportDelay,
                         Scenario::ExposureDelay, Scenario::Compensated, Scenario::ExposureLimit,
                         Scenario::ClockMissing, Scenario::CountInterpolation, Scenario::InvalidWhite,
-                        Scenario::InferenceOverload, Scenario::ModelSwitch}) {
+                        Scenario::InferenceOverload, Scenario::ModelSwitch, Scenario::RgbFrameLoss}) {
         if (name(option) == value) return option;
     }
     throw std::invalid_argument("unknown scenario");
@@ -39,11 +39,15 @@ InferenceMode inference_mode(std::string_view value) {
 
 Options parse(int argc, char** argv) {
     Options out;
+    bool scenario_set{}, inference_set{};
     for (int i = 1; i < argc; ++i) {
         const std::string_view option = argv[i];
         if (++i >= argc) throw std::invalid_argument("missing option value");
         const std::string_view value = argv[i];
-        if (option == "--scenario") out.scenario = scenario(value);
+        if (option == "--scenario") {
+            out.scenario = scenario(value);
+            scenario_set = true;
+        }
         else if (option == "--output") out.output = value;
         else if (option == "--speed-mm-s") out.speed_mm_s = bounded(value, 500, 3000);
         else if (option == "--rgb-width") out.profile.rgb_width = bounded(value, 16, 8192);
@@ -52,10 +56,20 @@ Options parse(int argc, char** argv) {
         else if (option == "--packet-lines") out.profile.packet_lines = bounded(value, 1, 8);
         else if (option == "--depth" && value == "independent") out.depth = DepthMode::Independent;
         else if (option == "--depth" && value == "encoder") out.depth = DepthMode::Encoder;
-        else if (option == "--m03") out.inference = inference_mode(value);
+        else if (option == "--m03") {
+            out.inference = inference_mode(value);
+            inference_set = true;
+        }
         else if (option == "--m03-mask" && value == "allow") out.allow_masks = true;
         else if (option == "--m03-mask" && value == "strict") out.allow_masks = false;
+        else if (option == "--layout" && value == "production") out.production = true;
+        else if (option == "--layout" && value == "demo") out.production = false;
         else throw std::invalid_argument("unknown option or value: " + std::string(option));
+    }
+    if (out.production) {
+        if (!scenario_set) out.scenario = Scenario::Normal;
+        if (!inference_set) out.inference = InferenceMode::Rgb;
+        out.profile = {8192, 640, 224, 256, production_frame_rows};
     }
     if (out.output.empty()) {
         const auto time = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -67,10 +81,11 @@ Options parse(int argc, char** argv) {
 }
 
 void help() {
-    std::cout << "m01_sim [--scenario NAME]\n"
+    std::cout << "m01_sim [--layout demo|production] [--scenario NAME]\n"
                  "        normal|missing|late|mixed|slow-archive|reconnect\n"
                  "        transport-delay|exposure-delay|compensated|exposure-limit\n"
                  "        clock-missing|count-interpolation|invalid-white|inference-overload|model-switch\n"
+                 "        production uses normal|rgb-frame-loss, RGB/off and 1000..3000 mm/s\n"
                  "        [--speed-mm-s 500..3000] [--depth independent|encoder]\n"
                  "        [--m03 off|rgb|hsi|split|joint] [--m03-mask strict|allow]\n"
                  "        [--rgb-width 16..8192] [--hsi-width 16..640]\n"
@@ -88,6 +103,7 @@ int main(int argc, char** argv) {
         const auto report = run(options);
         std::cout << (report.passed ? "PASS" : "FAIL")
                   << " pairs=" << report.paired << " missing=" << report.missing << " late=" << report.late
+                  << " rgb_rows=" << report.rgb_rows << " independent_hsi=" << report.independent_hsi
                   << " m02_coverage=" << report.covered << "/" << report.calibrated
                   << " m03_detected=" << report.detected_windows << " m03_empty=" << report.empty_windows
                   << " m03_invalid=" << report.invalid_windows << " m03_expired=" << report.expired_windows

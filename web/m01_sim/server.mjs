@@ -26,6 +26,7 @@ const assets = new Map([
   ['/drawing.mjs', ['drawing.mjs', 'text/javascript; charset=utf-8']],
   ['/calibration.mjs', ['calibration.mjs', 'text/javascript; charset=utf-8']],
   ['/inference.mjs', ['inference.mjs', 'text/javascript; charset=utf-8']],
+  ['/assets/materials.png', ['assets/materials.png', 'image/png']],
 ]);
 const execute = promisify(execFile);
 const security = {
@@ -73,25 +74,31 @@ async function simulate(req, res) {
   } catch {
     return json(res, 400, { error: '请求格式无效。' });
   }
-  const { scenario, speed, depth, profile, packetLines, inference = 'joint', masks = 'strict' } = options;
-  if (!scenarios.has(scenario) || !Number.isInteger(speed) || speed < 500 || speed > 3000 ||
-      !['independent', 'encoder'].includes(depth) || !devices.has(profile) ||
-      !Number.isInteger(packetLines) || packetLines < 1 || packetLines > 8 ||
-      !['off', 'rgb', 'hsi', 'split', 'joint'].includes(inference) || !['strict', 'allow'].includes(masks)) {
+  const { layout = 'demo', scenario, speed, depth, profile, packetLines,
+    inference = layout === 'production' ? 'rgb' : 'joint', masks = 'strict' } = options;
+  const production = layout === 'production';
+  const validLayout = production ?
+    ['normal', 'rgb-frame-loss'].includes(scenario) && ['off','rgb'].includes(inference) :
+    layout === 'demo' && scenarios.has(scenario) && devices.has(profile) &&
+      Number.isInteger(packetLines) && packetLines >= 1 && packetLines <= 8 &&
+      ['off', 'rgb', 'hsi', 'split', 'joint'].includes(inference);
+  if (!validLayout || !Number.isInteger(speed) || speed < (production ? 1000 : 500) || speed > 3000 ||
+      !['independent', 'encoder'].includes(depth) || !['strict', 'allow'].includes(masks)) {
     return json(res, 400, { error: '请检查速度、场景或传感器参数。' });
   }
   if (busy) return json(res, 409, { error: '另一轮仿真正在归档，请稍候。' });
   busy = true;
   const id = randomUUID();
-  const [rgb, hsi, bands] = devices.get(profile);
+  const [rgb, hsi, bands] = devices.get(profile) ?? [];
+  const deviceArgs = production ? [] :
+    ['--rgb-width', rgb, '--hsi-width', hsi, '--hsi-bands', bands, '--packet-lines', String(packetLines)];
   const path = join(output, id);
   try {
     await mkdir(output, { recursive: true });
     try {
-      await execute(binary, ['--output', path, '--scenario', scenario, '--speed-mm-s', String(speed),
-        '--depth', depth, '--rgb-width', rgb, '--hsi-width', hsi, '--hsi-bands', bands,
-        '--packet-lines', String(packetLines), '--m03', inference, '--m03-mask', masks],
-      { timeout: 60000, maxBuffer: 128 * 1024 });
+      await execute(binary, ['--output', path, '--layout', layout, '--scenario', scenario, '--speed-mm-s', String(speed),
+        '--depth', depth, ...deviceArgs, '--m03', inference, '--m03-mask', masks],
+      { timeout: 120000, maxBuffer: 128 * 1024 });
     } catch (error) {
       // Exit 1 includes a completed, failed validation report.
       if (error.code !== 1) throw error;

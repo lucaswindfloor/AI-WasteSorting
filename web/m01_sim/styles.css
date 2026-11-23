@@ -156,3 +156,16 @@ tr.selected { background: #213c51; }
 @media (max-width: 620px) {
   .inference-details th, .inference-details td { padding-inline: .28rem; font-size: .72rem; }
 }
+
+.plant-tools { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .8rem; margin-bottom: .6rem; }
+.plant-tools[hidden], .plant-materials[hidden], .controls label[hidden] { display: none; }
+.plant-tools label, .plant-tools span { color: var(--muted); font-size: .78rem; }
+.plant-tools select { min-height: 29px; padding-block: 2px; }
+.plant-materials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; margin-bottom: 13px; }
+.plant-materials article { display: flex; align-items: center; justify-content: space-between; gap: .8rem; }
+.plant-materials h2 { font-size: .95rem; margin-bottom: .3rem; }
+.plant-materials p { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+.plant-materials canvas { width: min(56%, 325px); }
+@media (max-width: 620px) {
+  .plant-materials { grid-template-columns: minmax(0, 1fr); }
+}

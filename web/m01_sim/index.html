@@ -15,8 +15,10 @@
   </header>
   <main>
     <form id="controls" class="controls panel">
+      <label>台架布局<select name="layout"><option value="production">生产比例 · MV-CL083</option><option value="demo">原有演示与故障场景</option></select></label>
       <label>场景<select name="scenario">
-        <option value="mixed">高光谱漏行与晚到</option><option value="normal">正常采集</option>
+        <option value="mixed">高光谱漏行与晚到</option><option value="normal" selected>正常采集</option>
+        <option value="rgb-frame-loss">RGB 整帧丢失</option>
         <option value="missing">高光谱漏行</option><option value="late">高光谱晚到</option>
         <option value="slow-archive">归档变慢</option><option value="reconnect">设备重连</option>
         <optgroup label="M02 时空与标定">
@@ -39,7 +41,7 @@
       <label>每包最多行数<select name="packetLines"><option value="1">1 行</option><option value="2" selected>2 行</option><option value="4">4 行</option><option value="8">8 行</option></select></label>
       <label>M03 推理路径<select name="inference">
         <option value="joint">RGB＋HSI 联合</option><option value="split">RGB／HSI 分路</option>
-        <option value="rgb">仅 RGB 轮廓</option><option value="hsi">仅 HSI 材质</option><option value="off">关闭 M03</option>
+        <option value="rgb" selected>仅 RGB 轮廓</option><option value="hsi">仅 HSI 材质</option><option value="off">关闭 M03</option>
       </select></label>
       <label>M03 输入要求<select name="masks"><option value="strict">要求完整输入</option><option value="allow">允许部分缺测</option></select></label>
       <button type="submit" class="primary" id="run">运行仿真</button>
@@ -48,7 +50,11 @@
 
     <div class="station">
       <section class="panel conveyor">
-        <div class="head"><div><h2>传送带与扫描线</h2><p id="geometry">每 1.5 mm 发出一次共同触发</p></div><span id="current-pulse" class="mono info">触发 —</span></div>
+        <div class="head"><div><h2>传送带与扫描工位</h2><p id="geometry">运行后显示实际毫米比例和设备位置。</p></div><span id="current-pulse" class="mono info">触发 —</span></div>
+        <div class="plant-tools" id="plant-tools" hidden>
+          <label>比例视图 <select id="plant-view"><option value="line">全线</option><option value="infeed">入料与扫描段</option></select></label>
+          <span id="plant-stations"></span>
+        </div>
         <canvas id="belt" width="1000" height="380" aria-label="传送带顶视图，显示物料、编码器位置和扫描线" role="img"></canvas>
         <div class="transport">
           <button type="button" id="play" disabled>播放</button><button type="button" id="step" disabled>下一事件</button>
@@ -61,7 +67,7 @@
       </section>
 
       <section class="panel ledger">
-        <div class="head"><div><h2>触发账本</h2><p>使用 M01 的实际配对结果</p></div><button id="first-gap" type="button" disabled>首条缺口</button></div>
+        <div class="head"><div><h2>触发账本</h2><p id="ledger-description">使用 M01 的实际配对结果</p></div><button id="first-gap" type="button" disabled>首条缺口</button></div>
         <form class="lookup" id="lookup"><label>触发号 <input id="trigger-input" type="number" min="1" max="240" required value="87" disabled></label>
           <button type="submit" id="jump" disabled>定位结果</button>
           <button type="button" id="exposure" disabled>触发瞬间</button></form>
@@ -75,6 +81,17 @@
         <a class="calibration-link" href="#inference">查看 M03 推理窗口</a>
       </section>
     </div>
+
+    <section class="plant-materials" id="plant-materials" aria-label="仿真物料与实际尺寸" hidden>
+      <article class="panel">
+        <div><h2>PET 饮料瓶</h2><p id="material-pet-size"></p></div>
+        <canvas id="material-pet" width="380" height="128" role="img" aria-label="透明 PET 饮料瓶俯视图"></canvas>
+      </article>
+      <article class="panel">
+        <div><h2>铝饮料罐</h2><p id="material-al-size"></p></div>
+        <canvas id="material-al" width="380" height="128" role="img" aria-label="铝饮料罐俯视图"></canvas>
+      </article>
+    </section>
 
     <section class="panel preview-controls" aria-label="扫描预览方式">
       <label>预览方式 <select id="preview-mode">
@@ -154,7 +171,7 @@
     <section class="panel outcome">
       <div class="head"><div><h2>校验结果</h2><p id="summary">运行后显示采集、配准和归档的核对结果。</p></div>
         <div class="downloads"><a id="csv" hidden>下载账本 CSV</a><a id="json" hidden>下载事件 JSON</a></div></div>
-      <dl class="meters"><div><dt>M01 完整配对</dt><dd id="pairs">—</dd></div><div><dt>M02 共同覆盖</dt><dd id="m02-total">—</dd></div><div><dt>HSI 缺口</dt><dd id="gaps">—</dd></div>
+      <dl class="meters"><div><dt id="pair-title">M01 完整配对</dt><dd id="pairs">—</dd></div><div><dt id="coverage-title">M02 共同覆盖</dt><dd id="m02-total">—</dd></div><div><dt id="gap-title">HSI 缺口</dt><dd id="gaps">—</dd></div>
         <div><dt>晚到证据</dt><dd id="late">—</dd></div><div><dt>E05 观测</dt><dd id="depth-total">—</dd></div>
         <div><dt>M09 校验块</dt><dd id="verified">—</dd></div></dl>
       <p id="inference-total" hidden></p>

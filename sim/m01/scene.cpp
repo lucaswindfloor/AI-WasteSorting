@@ -1,5 +1,7 @@
 #include "scene.h"
+#include "material_texture.h"
 
+#include <algorithm>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -27,12 +29,12 @@ namespace {
 
 struct Cut {
     int index{-1};
-    double height{};
+    double height{}, along{}, across{};
 };
 
-Cut sample(double sensor_x, double displacement, double lateral) {
-    for (std::size_t i = 0; i < materials.size(); ++i) {
-        const auto& item = materials[i];
+Cut sample(const Layout& layout, double sensor_x, double displacement, double lateral) {
+    for (std::size_t i = 0; i < layout.objects.size(); ++i) {
+        const auto& item = layout.objects[i];
         const auto x = sensor_x - item.x - displacement;
         const auto y = lateral - item.y;
         if (std::abs(x) >= item.length / 2) continue;
@@ -45,7 +47,7 @@ Cut sample(double sensor_x, double displacement, double lateral) {
         const auto width = item.width * std::lerp(left->width_fraction, right->width_fraction, fraction);
         const auto edge = (2 * y / width);
         if (std::abs(edge) >= 1) continue;
-        return {static_cast<int>(i), item.height * std::sqrt(1 - edge * edge)};
+        return {static_cast<int>(i), item.height * std::sqrt(1 - edge * edge), along, (edge + 1) / 2};
     }
     return {};
 }
@@ -76,16 +78,25 @@ std::vector<std::string> wavelengths(unsigned bands) {
     return values;
 }
 
-Scan scan(m01::Source source, const Profile& profile, double displacement, bool mask_depth, double sensor_x) {
+Scan scan(m01::Source source, const Profile& profile, const Layout& layout,
+          double displacement, bool mask_depth, double sensor_x) {
     Scan out;
     const auto width = width_for(source, profile);
+    const auto item_bytes = source == m01::Source::Hsi ? 2 * profile.hsi_bands : source == m01::Source::Rgb ? 3 : 4;
+    out.bytes.reserve(width * (item_bytes + (mask_depth ? 1 : 0)));
     for (unsigned i = 0; i < width; ++i) {
-        const auto cut = sample(sensor_x, displacement, (i + 0.5) * belt_width / width);
+        const auto cut = sample(layout, sensor_x, displacement, (i + 0.5) * layout.width / width);
         const auto stripe = i % 9;
         if (source == m01::Source::Rgb) {
             const std::array palettes{std::array{22u, 34u, 47u}, std::array{41u, 189u, 229u},
                                       std::array{227u, 139u, 57u}};
             auto rgb = palettes[cut.index + 1];
+            if (layout.length && cut.index >= 0) {
+                const auto tx = std::min(static_cast<unsigned>(cut.along * material_texture_width), material_texture_width - 1);
+                const auto ty = std::min(static_cast<unsigned>(cut.across * material_texture_height), material_texture_height - 1);
+                const auto color = material_textures[cut.index][ty * material_texture_width + tx];
+                rgb = {color >> 16, (color >> 8) & 255u, color & 255u};
+            }
             for (auto channel : rgb) pack(out.bytes, std::min(255u, channel + stripe), 1);
         } else if (source == m01::Source::Hsi) {
             for (unsigned band = 0; band < profile.hsi_bands; ++band) {

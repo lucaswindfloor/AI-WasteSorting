@@ -3,6 +3,30 @@ const colors = {
   belt: '#182739', border: '#38536b', amber: '#f7ad62',
 };
 
+const sprite = new Image();
+sprite.src = '/assets/materials.png';
+const spriteRects = { PET: [219, 33, 1341, 400], AL: [478, 496, 773, 366] };
+
+export function onMaterialsReady(paint) {
+  sprite.addEventListener('load', paint, { once: true });
+}
+
+function drawSprite(ctx, material, left, top, width, height) {
+  const bounds = spriteRects[material];
+  if (!bounds || !sprite.complete || !sprite.naturalWidth) return false;
+  ctx.drawImage(sprite, ...bounds, left, top, width, height);
+  return true;
+}
+
+export function drawMaterialCard(canvas, item) {
+  const ctx = canvas.getContext('2d');
+  const scale = 1.4;
+  const width = item.length * scale, height = item.width * scale;
+  ctx.fillStyle = '#111e2c';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  drawSprite(ctx, item.material, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+}
+
 function box(ctx, x, y, width, height, radius, fill, border) {
   ctx.beginPath();
   ctx.roundRect(x, y, width, height, radius);
@@ -85,7 +109,11 @@ function drawCandidates(ctx, evidence, x, y, offset, prefix = '') {
   }
 }
 
-export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence = []) {
+export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence = [], view = 'line') {
+  if (meta?.layout === 'production') {
+    drawProductionBelt(canvas, meta, now, pulse, evidence, view);
+    return;
+  }
   const ctx = canvas.getContext('2d');
   const shift = distanceAt(meta, now);
   const scanX = meta?.scanX ?? 142;
@@ -138,6 +166,68 @@ export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence 
   if (packet) {
     box(ctx, 719, 322, 222, 33, 7, '#162737', '#365267');
     text(ctx, packet.source + '  收件 ' + packet.bytes.toLocaleString('zh-CN') + ' B', 730, 344, colors.ink, 14);
+  }
+}
+
+function drawProductionBelt(canvas, meta, now, pulse, evidence, view) {
+  const ctx = canvas.getContext('2d');
+  const span = view === 'infeed' ? 1850 : meta.beltLength;
+  const scale = Math.min((canvas.width - 64) / span, (canvas.height - 145) / meta.beltWidth);
+  const start = (canvas.width - span * scale) / 2;
+  const y0 = 95, y1 = y0 + meta.beltWidth * scale;
+  const x = (mm) => start + mm * scale;
+  const y = (mm) => y0 + mm * scale;
+  const shift = distanceAt(meta, now);
+  const viewEnd = x(span);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  box(ctx, 0, 0, canvas.width, canvas.height, 14, '#0b1523');
+  box(ctx, start - 5, y0 - 7, viewEnd - start + 10, y1 - y0 + 14, 8, '#33465a');
+  box(ctx, start, y0, viewEnd - start, y1 - y0, 2, '#1b2a36');
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(start, y0, viewEnd - start, y1 - y0);
+  ctx.clip();
+  for (let mm = shift % 150; mm < span; mm += 150) line(ctx, x(mm), y0, x(mm), y1, '#273944');
+  line(ctx, start, y(meta.beltWidth / 2), viewEnd, y(meta.beltWidth / 2), '#374c56');
+  if (meta.pickBegin < span) {
+    box(ctx, x(meta.pickBegin), y0, x(meta.pickEnd) - x(meta.pickBegin), y1 - y0, 0, '#25574569', '#80d3a0');
+    text(ctx, '抓取区', x(meta.pickBegin) + 8, y0 + 23, '#a4e7b9', 14);
+  }
+  for (const item of meta.objects) {
+    const center = item.x + shift;
+    const left = x(center - item.length / 2);
+    const top = y(item.y - item.width / 2);
+    if (!drawSprite(ctx, item.material, left, top, item.length * scale, item.width * scale)) {
+      drawFootprint(ctx, item, shift, x, y, '#bdd7e2', '#7ca4b5');
+    }
+    text(ctx, item.id, left, top - 5, '#e3edf3', 12);
+  }
+  drawCandidates(ctx, evidence, x, y, shift, '');
+  const stations = [
+    ['RGB', meta.scanX, colors.cyan],
+    ['HSI', meta.hsiScanX, '#c5aafa'],
+    ['深度', meta.depthScanX, '#8ee4ba'],
+  ];
+  for (const [label, at, color] of stations) {
+    line(ctx, x(at), y0, x(at), y1, color, label === 'RGB' && pulse && now - pulse.t < 2 ? 4 : 1.5);
+  }
+  ctx.restore();
+  for (const [label, at, color] of stations) {
+    line(ctx, x(at), y0, x(at), y0 - 16, color);
+    ctx.textAlign = 'center';
+    text(ctx, label, x(at), y0 - 25, color, 15);
+  }
+  ctx.textAlign = 'left';
+  text(ctx, '入料端', start, y0 - 44, '#c4d7e5', 15);
+  const step = span > 2000 ? 1000 : 500;
+  for (let mm = 0; mm <= span; mm += step) {
+    line(ctx, x(mm), y1 + 8, x(mm), y1 + 15, colors.dim);
+    text(ctx, (mm / 1000).toFixed(mm % 1000 ? 1 : 0) + ' m', x(mm), y1 + 35, colors.ink, 14);
+  }
+  if (span === meta.beltLength) {
+    ctx.textAlign = 'right';
+    text(ctx, (span / 1000).toFixed(1) + ' m', viewEnd, y1 + 35, colors.ink, 14);
+    ctx.textAlign = 'left';
   }
 }
 
@@ -213,8 +303,10 @@ export function drawAlignedPreview(canvas, samples, sensor, meta, outline) {
     if (!sample || !Number.isFinite(sample.displacementMm)) continue;
     // The fixed scan line intersects this position in the moving belt frame.
     const center = (sample.scanX ?? scanX) - sample.displacementMm;
-    const x0 = Math.round(x(center - pitch / 2));
-    const x1 = Math.round(x(center + pitch / 2));
+    const width = sample.pitch ?? pitch;
+    const x0 = Math.round(x(center - width / 2));
+    const x1 = Math.round(x(center + width / 2));
+    if (x1 <= x0 || x1 <= left || x0 >= left + extent * scale) continue;
     for (let row = 0; row < previewWidth; row++) {
       ctx.fillStyle = `rgb(${previewColor(sample.pixels, sensor, row).join(',')})`;
       const y0 = Math.round(y(row * step));

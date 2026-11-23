@@ -14,7 +14,7 @@ std::string_view name(m03::Route route);
 std::string_view name(m03::State state);
 std::span<const std::byte> inference_artifact(std::string_view version);
 m03::Manifest inference_manifest(m03::Route route, const m01::Config& config, const m02::Snapshot& snapshot,
-                                 std::string version, bool allow_masks);
+                                 std::string version, bool allow_masks, std::size_t rows, std::size_t step, m03::Tick budget);
 
 class SimulationBackend final : public m03::Backend {
 public:

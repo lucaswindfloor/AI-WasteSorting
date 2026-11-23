@@ -115,7 +115,7 @@ bool TriggerMatcher::remember(const Observation& observation, std::vector<Segmen
     const auto checksum = fingerprint(observation);
     if (const auto found = recent_rows_.find(header.id); found != recent_rows_.end()) {
         if (found->second.header != header || found->second.fingerprint != checksum) {
-            if (config_.routing == Routing::SharedTrigger && header.id.source != Source::E05) {
+            if (requires_trigger(config_.routing, header.id.source)) {
                 mark_conflict(found->second.header);
                 mark_conflict(header);
             }
@@ -143,8 +143,8 @@ std::vector<SegmentItem> TriggerMatcher::observe(Observation observation, Tick n
     const auto source = header.id.source;
     // Keep an unproven observation's evidence without consuming its source identity:
     // the adapter may subsequently supply proof for the same row.
-    if (source != Source::E05 && config_.routing == Routing::SharedTrigger &&
-        (!trigger || !header.association_verified)) {
+    const auto triggered = requires_trigger(config_.routing, source);
+    if (triggered && (!trigger || !header.association_verified)) {
         if (trigger && trigger->sync_session == config_.sync.session &&
             trigger->encoder_epoch == config_.encoder_epoch &&
             (!latest_sync_ || *trigger > *latest_sync_ || pending_.contains(*trigger))) {
@@ -159,7 +159,7 @@ std::vector<SegmentItem> TriggerMatcher::observe(Observation observation, Tick n
         out.emplace_back(observation_issue(Issue::UnknownAssociation, observation));
         return out;
     }
-    if (source != Source::E05 && config_.routing == Routing::SharedTrigger && trigger &&
+    if (triggered && trigger &&
         (trigger->sync_session != config_.sync.session ||
          trigger->encoder_epoch != config_.encoder_epoch)) {
         out.emplace_back(observation_issue(Issue::WrongSession, observation));
@@ -168,7 +168,7 @@ std::vector<SegmentItem> TriggerMatcher::observe(Observation observation, Tick n
     if (!remember(observation, out)) {
         return out;
     }
-    if (source == Source::E05 || config_.routing == Routing::Independent) {
+    if (!triggered) {
         out.emplace_back(std::move(observation));
         return out;
     }
@@ -203,7 +203,7 @@ std::vector<SegmentItem> TriggerMatcher::observe(Observation observation, Tick n
 void TriggerMatcher::finish_if_complete(std::map<TriggerKey, Pending>::iterator entry,
                                         std::vector<SegmentItem>& out) {
     const auto& item = entry->second;
-    if (item.event && item.rgb && item.hsi) {
+    if (item.event && item.rgb && (item.hsi || config_.routing == Routing::RgbTriggered)) {
         finish(entry, out);
     }
 }
@@ -213,7 +213,8 @@ void TriggerMatcher::finish(std::map<TriggerKey, Pending>::iterator entry,
     auto& item = entry->second;
     if (item.event) {
         const auto rgb = quality(item.rgb, item.rgb_conflict || (!item.rgb && item.rgb_hint));
-        const auto hsi = quality(item.hsi, item.hsi_conflict || (!item.hsi && item.hsi_hint));
+        const auto hsi = config_.routing == Routing::RgbTriggered ? Quality::Unknown :
+            quality(item.hsi, item.hsi_conflict || (!item.hsi && item.hsi_hint));
         out.emplace_back(TriggerRecord{std::move(*item.event), item.sync_received,
                                        std::move(item.rgb), std::move(item.hsi), rgb, hsi});
     } else {

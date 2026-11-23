@@ -202,7 +202,7 @@ std::span<const std::byte> inference_artifact(std::string_view version) {
 }
 
 m03::Manifest inference_manifest(m03::Route route, const m01::Config& config, const m02::Snapshot& snapshot,
-                                 std::string version, bool allow_masks) {
+                                 std::string version, bool allow_masks, std::size_t rows, std::size_t step, m03::Tick budget) {
     using namespace std::chrono_literals;
     m03::Manifest manifest;
     manifest.route = route;
@@ -220,9 +220,12 @@ m03::Manifest inference_manifest(m03::Route route, const m01::Config& config, co
                                      std::vector<float>(bands.size(), 1.f)};
     }
     const auto width = manifest.rgb ? config.rgb.format.width : config.hsi.format.width;
-    manifest.window = {inference_rows, inference_step, allow_masks ? 2u : 0u, 128, 110ms,
-                       allow_masks, allow_masks ? 0.85f : 1.f};
-    manifest.raster = {0, 0, inference_rows, width, inference_rows, std::min<std::size_t>(width, 64), 0, 0, 0, 0, 0};
+    const auto production = config.routing == m01::Routing::RgbTriggered;
+    manifest.window = {rows, step, allow_masks ? 2u : 0u, production ? rows + 2 * step : 128,
+                       production ? budget : 110ms, allow_masks, allow_masks ? 0.85f : 1.f};
+    const auto resized_rows = production ? rows / 4 : rows;
+    const auto resized_cols = std::min<std::size_t>(width, production ? 250 : 64);
+    manifest.raster = {0, 0, rows, width, resized_rows, resized_cols, 0, 0, 0, 0, 0};
     if (route == m03::Route::Rgb) {
         manifest.labels = {{"object", m03::EvidenceKind::Contour}};
     } else {

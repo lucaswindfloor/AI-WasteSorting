@@ -1,5 +1,5 @@
 import { CalibrationView } from './calibration.mjs';
-import { distanceAt, drawAlignedPreview, drawBelt, drawPreview } from './drawing.mjs';
+import { distanceAt, drawAlignedPreview, drawBelt, drawMaterialCard, drawPreview, onMaterialsReady } from './drawing.mjs';
 import { InferenceView, windowKey } from './inference.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -10,7 +10,7 @@ const names = {
   DuplicateConflict: '重复数据有冲突', InvalidPacket: '封包格式无效', UnknownAssociation: '触发归属待核',
 };
 const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02-depth',
-  'm03-model', 'm03-window', 'diagnostic', 'archive', 'reconnect', 'seal']);
+  'm03-model', 'm03-window', 'hsi-independent', 'm02-hsi', 'diagnostic', 'archive', 'reconnect', 'seal']);
 const calibration = new CalibrationView();
 const inference = new InferenceView(inspectSource);
 const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -27,6 +27,8 @@ let currentRows = new Map();
 let archiveRows = new Map();
 let cameraRows = [];
 let depthRows = [];
+let independentHsi = [];
+let lastHsi = -1;
 let depthCount = 0;
 let seenPackets = 0;
 let latestTrigger = null;
@@ -55,6 +57,8 @@ function reset() {
   archiveRows = new Map();
   cameraRows = [];
   depthRows = [];
+  independentHsi = [];
+  lastHsi = -1;
   depthCount = 0;
   latestTrigger = null;
   latestPacket = null;
@@ -79,6 +83,8 @@ function ingest(event) {
   } else if (event.type === 'result') {
     currentRows.set(data.trigger, data);
     cameraRows[data.trigger - 1] = data;
+  } else if (event.type === 'hsi-independent') {
+    independentHsi.push(data);
   } else if (event.type === 'depth') {
     depthCount++;
     depthRows.push(data);
@@ -92,7 +98,7 @@ function ingest(event) {
 }
 
 function paintTable() {
-  const ids = [...currentRows.keys()].sort((a, b) => a - b).slice(-7);
+  const ids = [...currentRows.keys()].slice(-7).sort((a, b) => a - b);
   if (selected && currentRows.has(selected) && !ids.includes(selected)) ids.unshift(selected);
   const signature = ids.join(',') + '/' + ids.map((id) => archiveRows.get(id)).join(',') + '/' + selected;
   if (signature === rowSignature) return;
@@ -123,8 +129,9 @@ function paintTable() {
     for (const quality of [data.rgbQuality, data.hsiQuality]) {
       const cell = row.insertCell();
       const label = document.createElement('span');
-      label.textContent = names[quality] ?? quality;
-      label.className = 'quality ' + (quality === 'valid' ? 'ok' : 'warn');
+      const independent = report?.meta.layout === 'production' && quality === 'unknown';
+      label.textContent = independent ? '独立采集' : names[quality] ?? quality;
+      label.className = 'quality' + (independent ? '' : quality === 'valid' ? ' ok' : ' warn');
       cell.append(label);
     }
     row.insertCell().textContent = archiveRows.has(id) ? 'v' + archiveRows.get(id) : '待提交';
@@ -147,7 +154,7 @@ function paintDetail() {
     const version = archiveRows.get(selected);
     $('detail').textContent = '#' + selected + ' · 世代 ' + row.generation + ' · 编码器 ' + row.count +
       ' · M01 段 ' + row.segment + (version ? ' · M09 v' + version : ' · 归档待提交') + '\n' +
-      describe('RGB', row.rgb, row.rgbQuality) + '\n' + describe('HSI', row.hsi, row.hsiQuality);
+      describe('RGB', row.rgb, row.rgbQuality) + '\n' + (report?.meta.layout === 'production' ? 'HSI 独立采集' : describe('HSI', row.hsi, row.hsiQuality));
   }
   const incident = latestDiagnostic;
   $('diagnostic').hidden = !incident;
@@ -162,7 +169,7 @@ function paint() {
   const aligned = $('preview-mode').value === 'aligned';
   const outline = $('preview-outline').checked;
   drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic,
-    $('inference-overlay').checked ? inference.current()?.evidence : undefined);
+    $('inference-overlay').checked ? inference.current()?.evidence : undefined, $('plant-view').value);
   $('current-pulse').textContent = '触发 ' + (latestTrigger?.trigger ? '#' + latestTrigger.trigger : '—');
   $('time').textContent = cursor.toFixed(1) + ' ms';
   $('seek').value = cursor;
@@ -177,7 +184,7 @@ function paint() {
   inference.paint(meta, currentRows);
   if (lastColumns !== currentRows.size) {
     lastColumns = currentRows.size;
-    for (const sensor of ['rgb', 'hsi']) {
+    for (const sensor of meta?.layout === 'production' ? ['rgb'] : ['rgb', 'hsi']) {
       if (aligned) {
         const samples = [...currentRows.values()].map((row) =>
           ({ displacementMm: sensor === 'hsi' ? row.hsiDisplacementMm ?? row.displacementMm : row.displacementMm,
@@ -189,9 +196,18 @@ function paint() {
       }
     }
   }
+  if (meta?.layout === 'production' && lastHsi !== independentHsi.length) {
+    lastHsi = independentHsi.length;
+    if (aligned) {
+      const samples = independentHsi.map((row) => ({ ...row, scanX: meta.hsiScanX, pitch: meta.hsiPitch }));
+      drawAlignedPreview($('hsi'), samples, 'hsi', meta, outline);
+    } else {
+      drawPreview($('hsi'), independentHsi.map((row) => row.pixels), 'hsi', meta.previewWidth);
+    }
+  }
   if (lastDepths !== depthCount) {
     lastDepths = depthCount;
-    if (aligned) drawAlignedPreview($('depth'), depthRows, 'depth', meta, outline);
+    if (aligned) drawAlignedPreview($('depth'), depthRows.map((row) => ({ ...row, scanX: meta.depthScanX })), 'depth', meta, outline);
     else drawPreview($('depth'), depthRows.map((row) => row.pixels), 'depth', meta?.previewWidth);
   }
 }
@@ -221,7 +237,7 @@ function play() {
     if (!playing) return;
     const realDelta = previous === undefined ? 0 : Math.min(now - previous, 50);
     previous = now;
-    seek(cursor + realDelta * 0.043);
+    seek(cursor + realDelta * (report.meta.layout === 'production' ? 0.25 : 0.043));
     if (cursor >= report.meta.durationMs) pause();
     else frame = requestAnimationFrame(animate);
   };
@@ -263,11 +279,21 @@ function install(data) {
   for (const id of ['seek', 'play', 'step', 'jump', 'trigger-input']) $(id).disabled = false;
   $('seek').max = meta.durationMs;
   $('trigger-input').max = summary.expected;
-  firstGap = report.events.find((event) => event.type === 'result' && event.data.hsiQuality === 'missing');
+  firstGap = report.events.find((event) => event.type === 'result' && (meta.layout === 'production' ? event.data.rgbQuality : event.data.hsiQuality) === 'missing');
   $('first-gap').disabled = !firstGap;
   firstCandidate = report.events.find((event) => event.type === 'm03-window' && event.data.state === 'completed');
   $('inference-first').disabled = !firstCandidate;
-  $('geometry').textContent = '每 ' + meta.pitch + ' mm 触发一次 · ' + (meta.speed / 1000).toFixed(1) + ' m/s';
+  const production = meta.layout === 'production';
+  $('ledger-description').textContent = production ? 'RGB 有效行与编码器一一核对' : '使用 M01 的实际配对结果';
+  $('plant-tools').hidden = !production;
+  $('plant-materials').hidden = !production;
+  $('plant-view').value = 'line';
+  $('belt').height = 380;
+  $('plant-stations').textContent = 'RGB ' + meta.scanX + ' mm · HSI ' + meta.hsiScanX +
+    ' mm · 深度 ' + meta.depthScanX + ' mm · 抓取区 ' + meta.pickBegin + '–' + meta.pickEnd + ' mm';
+  paintMaterialCards();
+  $('geometry').textContent = (production ? meta.beltLength + ' × ' + meta.beltWidth + ' mm · RGB ' +
+    meta.rgbWidth + ' px × ' + meta.packetLines + ' 行/帧 · ' : '') + '每 ' + meta.pitch + ' mm 触发一次 · ' + (meta.speed / 1000).toFixed(1) + ' m/s';
   $('band').textContent = meta.hsiPreviewBand + ' nm 模拟波段 · 伪彩';
   status(summary.passed ? '校验通过' : '校验失败',
     summary.passed ? 'ok' : 'warn');
@@ -275,8 +301,12 @@ function install(data) {
     ? '已核对原始字节、源帧行和归档引用 · 封存清单 v' + summary.manifest +
       ' · 归档队列峰值 ' + summary.peakArchiveQueue
     : summary.errors.join('；');
-  $('pairs').textContent = summary.paired + ' / ' + summary.expected;
-  $('m02-total').textContent = summary.m02 ? summary.m02.covered + ' / ' + summary.m02.processed : '—';
+  $('pair-title').textContent = production ? 'M01 RGB 有效行' : 'M01 完整配对';
+  $('coverage-title').textContent = production ? '独立 HSI 采集行' : 'M02 共同覆盖';
+  $('gap-title').textContent = production ? 'RGB 缺行' : 'HSI 缺口';
+  $('pairs').textContent = (production ? summary.rgbRows : summary.paired) + ' / ' + summary.expected;
+  $('m02-total').textContent = production ? summary.independentHsi :
+    summary.m02 ? summary.m02.covered + ' / ' + summary.m02.processed : '—';
   $('gaps').textContent = summary.missing;
   $('late').textContent = summary.late;
   $('depth-total').textContent = summary.depth;
@@ -307,7 +337,7 @@ $('controls').addEventListener('submit', async (event) => {
   try {
     const response = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts),
-      signal: AbortSignal.timeout(65000),
+      signal: AbortSignal.timeout(125000),
     });
     const data = await response.json();
     if (!response.ok || data.report?.schema !== 1) throw new Error(data.error || '无法读取仿真事件。');
@@ -362,11 +392,54 @@ function changePreview() {
   $('preview-note').textContent = aligned
     ? '三图按皮带毫米坐标等比例显示，朝向与顶视图一致。虚线是仿真轮廓；深度只标出实测位置，不插值。'
     : '从左向右按触发或观测顺序拼接，先扫到的一端在左；此模式不按毫米等比例绘制。';
-  lastColumns = lastDepths = -1;
+  lastColumns = lastDepths = lastHsi = -1;
   paint();
 }
 $('calibration-mode').addEventListener('change', paint);
 $('inference-overlay').addEventListener('change', paint);
 $('preview-mode').addEventListener('change', changePreview);
 $('preview-outline').addEventListener('change', changePreview);
+function paintMaterialCards() {
+  if (report?.meta.layout !== 'production') return;
+  for (const item of report.meta.objects) {
+    const id = 'material-' + item.material.toLowerCase();
+    $(id + '-size').textContent = item.length + ' × ' + item.width + ' mm';
+    drawMaterialCard($(id), item);
+  }
+}
+
+function changeLayout() {
+  const form = $('controls');
+  const production = form.elements.layout.value === 'production';
+  const filter = (name, values) => {
+    const select = form.elements[name];
+    const current = select.value;
+    for (const option of select.options) {
+      option.hidden = Boolean(values && !values.includes(option.value)) ||
+        (!production && option.value === 'rgb-frame-loss');
+      option.disabled = option.hidden;
+    }
+    if (select.selectedOptions[0]?.disabled || !current) {
+      select.value = name === 'scenario' ? 'normal' : name === 'speed' ? '1000' : 'rgb';
+    }
+  };
+  filter('scenario', production ? ['normal', 'rgb-frame-loss'] : null);
+  filter('speed', production ? ['1000', '2000', '3000'] : null);
+  filter('inference', production ? ['rgb', 'off'] : null);
+  for (const name of ['profile', 'packetLines']) {
+    form.elements[name].disabled = production;
+    form.elements[name].closest('label').hidden = production;
+  }
+}
+
+$('controls').elements.layout.addEventListener('change', changeLayout);
+$('plant-view').addEventListener('change', () => {
+  $('belt').height = $('plant-view').value === 'infeed' ? 555 : 380;
+  paint();
+});
+onMaterialsReady(() => {
+  paintMaterialCards();
+  paint();
+});
+changeLayout();
 paint();

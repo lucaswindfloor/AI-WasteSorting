@@ -259,6 +259,52 @@ def run_case(binary, root, scenario, args, expected, covered, variant=""):
     return data
 
 
+def run_plant(binary, root, speed, scenario):
+    out = root / f"plant-{speed}"
+    command = [binary, "--layout", "production", "--speed-mm-s", str(speed),
+               "--scenario", scenario, "--output", str(out)]
+    run = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    assert run.returncode == 0, run.stdout + run.stderr
+    report = json.loads((out / "report.json").read_text())
+    meta, summary = report["meta"], report["summary"]
+
+    def events(kind):
+        return [event["data"] for event in report["events"] if event["type"] == kind]
+
+    assert meta["layout"] == "production"
+    assert (meta["beltLength"], meta["beltWidth"], meta["scanX"], meta["hsiScanX"], meta["depthScanX"]) == (
+        5500, 1000, 750, 1100, 1500)
+    assert meta["scanX"] < meta["beltLength"] / 4
+    assert meta["depthScanX"] < meta["pickBegin"] < meta["pickEnd"] < meta["beltLength"]
+    assert [(item["length"], item["width"]) for item in meta["objects"]] == [(210, 66), (122, 66)]
+    assert (meta["rgbWidth"], meta["packetLines"], meta["pitch"], meta["m03Rows"], meta["m03Step"]) == (
+        8192, 128, 1, 512, 128)
+    missing = scenario == "rgb-frame-loss"
+    rgb = [entry for entry in events("packet") if entry["source"] == "RGB"]
+    assert len(rgb) == 20 - missing
+    assert all(entry["rows"] == 128 and entry["bytes"] == 128 * 8192 * 3 for entry in rgb)
+    assert summary["passed"] and not summary["errors"]
+    assert summary["rgbRows"] == 2560 - 128 * missing and summary["archiveGaps"] == 128 * missing
+    assert {row["trigger"] for row in events("result") if row["rgbQuality"] == "missing"} == (
+        set(range(385, 513)) if missing else set())
+    assert all(row["hsi"] is None for row in events("result"))
+    hsi = events("m02-hsi")
+    assert len(hsi) == summary["independentHsi"] == 2560 // meta["hsiPitch"]
+    assert all(row["scanX"] == 1100 and row["corrected"] is not None for row in hsi)
+    assert all(row["measured"][0][0] == 1500 for row in (entry["observation"] for entry in events("m02-depth")))
+    complete = [row for row in events("m03-window") if row["state"] != "retired"]
+    assert [(row["first"], row["last"]) for row in complete] == [
+        (first, first + 511) for first in range(1, 2050, 128)]
+    assert all(row["finishedMs"] < row["deadlineMs"] for row in complete)
+    assert all(row["readyMs"] >= row["last"] * 1000 / speed - 0.01 for row in complete)
+    assert {row["first"] for row in complete if row["state"] == "input_invalid"} == (
+        {1, 129, 257, 385} if missing else set())
+    candidates = [candidate for row in complete for candidate in row["evidence"]]
+    assert any(300 < c["rgb"]["belt"][1] < 370 for c in candidates)  # PET in its lateral lane.
+    assert any(615 < c["rgb"]["belt"][1] < 685 for c in candidates)  # Al in its lateral lane.
+    print(f"production {speed} mm/s {scenario}: {summary['rgbRows']} RGB, {len(hsi)} HSI, {len(complete)} M03 windows")
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     cases = [
@@ -294,6 +340,8 @@ def main():
         again = subprocess.run([binary, "--output", str(root / "again")], capture_output=True, timeout=90)
         assert again.returncode == 0
         assert json.loads((root / "again" / "report.json").read_text()) == reports[3]
+        run_plant(binary, root, 1000, "normal")
+        run_plant(binary, root, 3000, "rgb-frame-loss")
     print("M01/M02/M03 simulator regression passed")
 
 

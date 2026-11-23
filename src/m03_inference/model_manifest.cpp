@@ -64,7 +64,9 @@ void validate(const Manifest& m) {
     }
     const auto pixels = r.height() * r.width();
     const auto channels = (m.rgb ? std::size_t{3} : 0) + (m.hsi ? m.hsi->bands.size() : 0);
-    if (r.rows > max_pixels / r.columns || pixels > max_pixels || pixels > max_values / channels || !m.max_candidates ||
+    // RGB reads only resized sample positions; the source-size limit for joint mapping stays smaller.
+    const auto max_source_pixels = m.route == Route::Rgb ? 4 * max_pixels : max_pixels;
+    if (r.rows > max_source_pixels / r.columns || pixels > max_pixels || pixels > max_values / channels || !m.max_candidates ||
         m.max_candidates > 1024 || pixels > max_projection_work / m.max_candidates || m.labels.empty() ||
         m.labels.size() > 1024 || !std::isfinite(m.threshold) ||
         (m.score_kind != ScoreKind::Probability && m.score_kind != ScoreKind::Score) ||
@@ -84,8 +86,10 @@ void validate(const Manifest& m) {
 }
 
 void verify_compatibility(const Manifest& m, const m01::Config& c, const m02::Snapshot& s) {
-    if (c.routing != m01::Routing::SharedTrigger || !c.contiguous_trigger_ids) {
-        throw std::invalid_argument("M03 grid requires verified contiguous shared-trigger IDs");
+    const bool compatible_routing = c.routing == m01::Routing::SharedTrigger ||
+        (c.routing == m01::Routing::RgbTriggered && m.route == Route::Rgb);
+    if (!compatible_routing || !c.contiguous_trigger_ids) {
+        throw std::invalid_argument("M03 grid requires verified contiguous trigger IDs for its route");
     }
     const auto& grid = m.rgb ? c.rgb.format : c.hsi.format;
     if (m.raster.left >= grid.width || m.raster.columns > grid.width - m.raster.left ||
