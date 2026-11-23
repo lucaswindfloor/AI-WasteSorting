@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const statusLabel = {
   available: '有共同覆盖',
-  independent_route: 'RGB 已标定 · HSI 独立',
+  independent_route: 'RGB 已标定 · HSI 独立采样',
   missing_input: '缺少一路原始数据',
   unusable_input: '来源质量或触发关联待核',
   unverified_time: '曝光时间无法核实',
@@ -192,7 +192,9 @@ export class CalibrationView {
         ' · ' + row.geometry + ' · ' + row.clock
       : selected ? '触发 #' + selected + ' 的 M02 结果尚未回放到。' : '运行后，选中触发即可查看坐标和标定版本。';
 
-    $('calibration-coverage').textContent = production ? 'HSI 与深度使用各自的曝光与位移观测。' :
+    const sharedScanLine = meta?.scanX === meta?.hsiScanX && meta?.scanX === meta?.depthScanX;
+    $('calibration-coverage').textContent = production ?
+      (sharedScanLine ? '三路共用扫描截面，' : '') + 'HSI 与深度保留各自的曝光时刻和位移。' :
       row ? '共同覆盖 ' + row.coverage + ' 个 RGB 列 · 曝光时差 ' +
       (Number.isFinite(row.rgb?.exposureMs) && Number.isFinite(row.hsi?.exposureMs)
         ? units(row.hsi.exposureMs - row.rgb.exposureMs, 'ms', 3) : '待核') +

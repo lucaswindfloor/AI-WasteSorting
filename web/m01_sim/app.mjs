@@ -289,8 +289,10 @@ function install(data) {
   $('plant-materials').hidden = !production;
   $('plant-view').value = 'line';
   $('belt').height = 380;
-  $('plant-stations').textContent = 'RGB ' + meta.scanX + ' mm · HSI ' + meta.hsiScanX +
-    ' mm · 深度 ' + meta.depthScanX + ' mm · 抓取区 ' + meta.pickBegin + '–' + meta.pickEnd + ' mm';
+  const sharedScanLine = meta.scanX === meta.hsiScanX && meta.scanX === meta.depthScanX;
+  const stations = sharedScanLine ? 'RGB / HSI / 深度共用截面 ' + meta.scanX + ' mm' :
+    'RGB ' + meta.scanX + ' mm · HSI ' + meta.hsiScanX + ' mm · 深度 ' + meta.depthScanX + ' mm';
+  $('plant-stations').textContent = stations + ' · 抓取区 ' + meta.pickBegin + '–' + meta.pickEnd + ' mm';
   paintMaterialCards();
   $('geometry').textContent = (production ? meta.beltLength + ' × ' + meta.beltWidth + ' mm · RGB ' +
     meta.rgbWidth + ' px × ' + meta.packetLines + ' 行/帧 · ' : '') + '每 ' + meta.pitch + ' mm 触发一次 · ' + (meta.speed / 1000).toFixed(1) + ' m/s';

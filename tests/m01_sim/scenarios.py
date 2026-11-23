@@ -273,7 +273,7 @@ def run_plant(binary, root, speed, scenario):
 
     assert meta["layout"] == "production"
     assert (meta["beltLength"], meta["beltWidth"], meta["scanX"], meta["hsiScanX"], meta["depthScanX"]) == (
-        5500, 1000, 750, 1100, 1500)
+        5500, 1000, 750, 750, 750)
     assert meta["scanX"] < meta["beltLength"] / 4
     assert meta["depthScanX"] < meta["pickBegin"] < meta["pickEnd"] < meta["beltLength"]
     assert [(item["length"], item["width"]) for item in meta["objects"]] == [(210, 66), (122, 66)]
@@ -290,8 +290,13 @@ def run_plant(binary, root, speed, scenario):
     assert all(row["hsi"] is None for row in events("result"))
     hsi = events("m02-hsi")
     assert len(hsi) == summary["independentHsi"] == 2560 // meta["hsiPitch"]
-    assert all(row["scanX"] == 1100 and row["corrected"] is not None for row in hsi)
-    assert all(row["measured"][0][0] == 1500 for row in (entry["observation"] for entry in events("m02-depth")))
+    assert all(row["scanX"] == meta["scanX"] and row["corrected"] is not None for row in hsi)
+    assert hsi[1]["count"] - hsi[0]["count"] == meta["hsiPitch"] * 20
+    rgb_aligned = [row["rgb"] for row in events("m02") if row["rgb"] is not None]
+    assert len(rgb_aligned) == summary["rgbRows"]
+    depth = [entry["observation"] for entry in events("m02-depth")]
+    assert len(depth) == summary["depth"] > 0
+    assert all(row["measured"][0][0] == meta["scanX"] for row in rgb_aligned + depth)
     complete = [row for row in events("m03-window") if row["state"] != "retired"]
     assert [(row["first"], row["last"]) for row in complete] == [
         (first, first + 511) for first in range(1, 2050, 128)]

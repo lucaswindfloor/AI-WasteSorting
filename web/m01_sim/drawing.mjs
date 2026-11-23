@@ -203,13 +203,14 @@ function drawProductionBelt(canvas, meta, now, pulse, evidence, view) {
     text(ctx, item.id, left, top - 5, '#e3edf3', 12);
   }
   drawCandidates(ctx, evidence, x, y, shift, '');
-  const stations = [
+  const sharedScanLine = meta.scanX === meta.hsiScanX && meta.scanX === meta.depthScanX;
+  const stations = sharedScanLine ? [['RGB / HSI / 深度', meta.scanX, colors.cyan]] : [
     ['RGB', meta.scanX, colors.cyan],
     ['HSI', meta.hsiScanX, '#c5aafa'],
     ['深度', meta.depthScanX, '#8ee4ba'],
   ];
-  for (const [label, at, color] of stations) {
-    line(ctx, x(at), y0, x(at), y1, color, label === 'RGB' && pulse && now - pulse.t < 2 ? 4 : 1.5);
+  for (const [, at, color] of stations) {
+    line(ctx, x(at), y0, x(at), y1, color, at === meta.scanX && pulse && now - pulse.t < 2 ? 4 : 1.5);
   }
   ctx.restore();
   for (const [label, at, color] of stations) {
