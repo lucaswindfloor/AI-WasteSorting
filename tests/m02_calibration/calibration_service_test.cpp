@@ -35,7 +35,8 @@ void service_integration() {
     const SyncWindow window{c.run_id, c.generation, samples};
     const ProcessContext context{&window, &state, nullptr, {}};
     const auto result = service.process(segment, context);
-    check(result.triggers.size() == 1 && result.triggers[0].common_coverage.size() == 2,
+    check(result.triggers.size() == 1 && result.triggers[0].common_coverage.size() == 2 &&
+          result.triggers[0].coverage_status == CoverageStatus::Available,
           "M01 data did not reach common geometric coverage");
     const auto& group = result.triggers[0];
     check(group.rgb && group.hsi && group.rgb->shift && near(group.rgb->shift->mm, -0.1) &&
@@ -45,6 +46,7 @@ void service_integration() {
 
     const auto no_counter = service.process(segment);
     check(no_counter.triggers[0].common_coverage.empty() &&
+          no_counter.triggers[0].coverage_status == CoverageStatus::UnverifiedCount &&
           no_counter.triggers[0].rgb->issue == "unverified_exposure_count" &&
           no_counter.triggers[0].rgb->measured.size() == 2, "missing count evidence hid valid geometry");
 
@@ -54,6 +56,7 @@ void service_integration() {
     missing_row.hsi_quality = Quality::Missing;
     const auto partial = service.process(missing, context);
     check(partial.triggers[0].common_coverage.empty() && !partial.triggers[0].hsi &&
+          partial.triggers[0].coverage_status == CoverageStatus::MissingInput &&
           partial.triggers[0].source.hsi_quality == Quality::Missing, "source gap was converted to valid coverage");
 
     CoordinateReference reference{c.run_id, c.generation, "geo", 10ms, group.reference_count};
@@ -81,6 +84,28 @@ void service_integration() {
           near(surface.independent[0].aligned[0].position.x, -0.5) &&
           surface.independent[0].reference_time->value == 10ms,
           "independent depth retained the wrong time, count or position");
+
+    auto second_depth = depth;
+    ++second_depth.header.id.frame;
+    independent->items.push_back(second_depth);
+    const std::array bindings{
+        ObservationReference{depth.header.id, reference_event},
+        ObservationReference{second_depth.header.id, samples.front()},
+    };
+    const auto separately_aligned = service.process(independent, {&window, &state, nullptr, {}, bindings});
+    check(separately_aligned.independent.size() == 2 &&
+          separately_aligned.independent[0].reference_time && separately_aligned.independent[0].shift &&
+          separately_aligned.independent[1].reference_time && separately_aligned.independent[1].shift &&
+          separately_aligned.independent[0].reference_time->value == 10ms &&
+          near(separately_aligned.independent[0].shift->mm, -0.5) &&
+          separately_aligned.independent[1].reference_time->value == 20ms &&
+          near(separately_aligned.independent[1].shift->mm, 0.5),
+          "independent reference leaked into another depth row");
+    const std::array ambiguous{bindings[0], bindings[0]};
+    const auto ambiguous_result = service.process(independent, {&window, &state, &reference_event, {}, ambiguous});
+    check(ambiguous_result.independent[0].issue == "ambiguous_independent_reference" &&
+          !ambiguous_result.independent[0].shift && ambiguous_result.independent[1].shift,
+          "ambiguous independent binding silently used the group reference");
 
     const auto next = acquisition_config(2);
     auto replacement = calibration(next);

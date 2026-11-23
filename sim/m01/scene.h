@@ -42,7 +42,7 @@ struct Scan {
     std::optional<m01::ByteRange> mask;
 };
 
-Scan scan(m01::Source source, const Profile& profile, double displacement, bool mask_depth);
+Scan scan(m01::Source source, const Profile& profile, double displacement, bool mask_depth, double sensor_x = scan_x);
 std::vector<std::string> wavelengths(unsigned bands);
 std::vector<int> preview(const m01::Observation& observation, const Profile& profile);
 

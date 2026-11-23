@@ -198,16 +198,26 @@ Result CalibrationService::process(std::shared_ptr<const m01::Segment> segment,
     }
     const auto& snapshot = *result.snapshot;
     const auto samples = timeline(snapshot, source, context.sync_window);
-    std::optional<CountEstimate> independent_reference;
-    std::optional<TimeEstimate> independent_reference_time;
-    if (context.independent_reference && current(snapshot, config, *context.independent_reference)) {
-        independent_reference_time = sync_time(snapshot, *context.independent_reference);
-        if (independent_reference_time) {
-            independent_reference = locked_count(snapshot.encoder, *context.independent_reference);
+    struct Reference {
+        std::optional<CountEstimate> count;
+        std::optional<TimeEstimate> time;
+    };
+    const auto resolve = [&](const m01::TriggerEvent* event) -> Reference {
+        if (event && current(snapshot, config, *event)) {
+            if (const auto time = sync_time(snapshot, *event)) {
+                return {locked_count(snapshot.encoder, *event), time};
+            }
         }
-    }
-    if (context.independent_reference && !independent_reference) {
+        return {};
+    };
+    const auto default_reference = resolve(context.independent_reference);
+    if (context.independent_reference && !default_reference.count) {
         result.issue = "invalid_independent_reference";
+    }
+    std::map<m01::ObservationId, const m01::TriggerEvent*> references;
+    for (const auto& binding : context.independent_references) {
+        const auto [entry, inserted] = references.emplace(binding.observation, &binding.reference);
+        if (!inserted) entry->second = nullptr;
     }
 
     for (const auto& item : source.items) {
@@ -238,13 +248,23 @@ Result CalibrationService::process(std::shared_ptr<const m01::Segment> segment,
                 group.hsi = align_row(*record->hsi, record->hsi_quality, m01::Source::Hsi);
             }
             if (group.rgb && group.hsi) {
-                group.common_coverage = overlap(snapshot, *group.rgb, *group.hsi);
+                if (group.rgb->source_quality != Quality::Valid || group.hsi->source_quality != Quality::Valid) {
+                    group.coverage_status = CoverageStatus::UnusableInput;
+                } else {
+                    group.common_coverage = overlap(snapshot, *group.rgb, *group.hsi, &group.coverage_status);
+                }
             }
             result.triggers.push_back(std::move(group));
         } else if (const auto* row = std::get_if<m01::Observation>(&item)) {
-            result.independent.push_back(align(snapshot, config, *row, row->header.source_quality, samples,
-                                               nullptr, independent_reference, independent_reference_time,
-                                               context.environment));
+            const auto binding = references.find(row->header.id);
+            const bool explicit_ref = binding != references.end();
+            const auto reference = explicit_ref ? resolve(binding->second) : default_reference;
+            auto observation = align(snapshot, config, *row, row->header.source_quality, samples,
+                                     nullptr, reference.count, reference.time, context.environment);
+            if (explicit_ref && !reference.count && observation.issue.empty()) {
+                observation.issue = binding->second ? "invalid_independent_reference" : "ambiguous_independent_reference";
+            }
+            result.independent.push_back(std::move(observation));
         } else if (const auto* diagnostic = std::get_if<m01::Diagnostic>(&item)) {
             result.acquisition_diagnostics.push_back(*diagnostic);
         }

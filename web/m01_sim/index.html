@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c1524">
-  <title>M01 传送带采集仿真</title>
+  <title>M01 / M02 传送带仿真</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.mjs" type="module"></script>
 </head>
 <body>
   <header class="top">
-    <div class="brand"><span class="mark" aria-hidden="true">M01</span><div><h1>传送带采集仿真</h1><p>RGB · HSI · 深度 · M09 归档</p></div></div>
+    <div class="brand"><span class="mark" aria-hidden="true">M01</span><div><h1>传送带采集仿真</h1><p>M01 采集 · M02 配准 · M09 归档</p></div></div>
     <p class="tag" id="run-status" role="status">待运行</p>
   </header>
   <main>
@@ -19,6 +19,15 @@
         <option value="mixed">高光谱漏行与晚到</option><option value="normal">正常采集</option>
         <option value="missing">高光谱漏行</option><option value="late">高光谱晚到</option>
         <option value="slow-archive">归档变慢</option><option value="reconnect">设备重连</option>
+        <optgroup label="M02 时空与标定">
+          <option value="transport-delay">HSI 只晚回包 1 ms</option>
+          <option value="exposure-delay">HSI 晚曝光 1 ms · 同一扫描线</option>
+          <option value="compensated">HSI 晚曝光 1 ms · 下游扫描</option>
+          <option value="exposure-limit">曝光时差超限</option>
+          <option value="clock-missing">缺少 HSI 时钟映射</option>
+          <option value="count-interpolation">曝光计数插值</option>
+          <option value="invalid-white">选定波段的暗白参考失效</option>
+        </optgroup>
       </select></label>
       <label>带速<select name="speed"><option value="500">0.5 m/s</option><option value="1000" selected>1.0 m/s</option><option value="2000">2.0 m/s</option><option value="3000">3.0 m/s</option></select></label>
       <label>深度采样<select name="depth"><option value="independent">独立采样</option><option value="encoder">每 8 次编码器触发</option></select></label>
@@ -53,6 +62,7 @@
         </div>
         <div id="detail" class="detail">选择触发号查看源帧行和收件时刻。</div>
         <p id="diagnostic" class="diagnostic" hidden></p>
+        <a class="calibration-link" href="#calibration">查看选中触发的 M02 配准</a>
       </section>
     </div>
 
@@ -72,10 +82,40 @@
         <canvas id="depth" width="400" height="272" role="img" aria-label="M01 实收深度图，琥珀色表示无效点"></canvas></article>
     </section>
 
+    <section class="panel calibration" id="calibration">
+      <div class="head">
+        <div><h2>M02 时空配准</h2><p id="calibration-version">运行后，选中触发即可查看皮带坐标和标定版本。</p></div>
+        <span class="tag" id="calibration-status">待运行</span>
+      </div>
+      <div class="calibration-grid">
+        <div class="calibration-plot">
+          <div class="calibration-tools">
+            <label>坐标视图 <select id="calibration-mode"><option value="aligned">补偿后 · 同一参考时刻</option>
+              <option value="measured">补偿前 · 各自曝光时刻</option></select></label>
+            <div class="plot-legend"><span class="legend-rgb">RGB</span><span class="legend-hsi">HSI</span><span class="legend-common">共同覆盖</span></div>
+          </div>
+          <canvas id="calibration-map" width="840" height="340" role="img"
+            aria-label="M02 皮带坐标原点局部图，横轴沿带，纵轴横向，单位毫米"></canvas>
+        </div>
+        <div class="calibration-details">
+          <div class="table-scroll"><table>
+            <thead><tr><th scope="col">观测</th><th scope="col">主机时基曝光</th><th scope="col">收件</th><th scope="col">沿带补偿</th></tr></thead>
+            <tbody id="calibration-times"><tr><td colspan="4">等待采集段</td></tr></tbody>
+          </table></div>
+          <p id="calibration-coverage"></p>
+          <p id="calibration-ref"></p>
+          <div class="calibration-evidence">
+            <div><h3>HSI 单点暗白校正</h3><p id="calibration-spectrum">等待观测</p></div>
+            <div><h3>E05 皮带坐标</h3><p id="calibration-depth">等待观测</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel outcome">
-      <div class="head"><div><h2>校验结果</h2><p id="summary">运行后显示 M01 与 M09 的交叉核对结果。</p></div>
+      <div class="head"><div><h2>校验结果</h2><p id="summary">运行后显示采集、配准和归档的核对结果。</p></div>
         <div class="downloads"><a id="csv" hidden>下载账本 CSV</a><a id="json" hidden>下载事件 JSON</a></div></div>
-      <dl class="meters"><div><dt>完整配对</dt><dd id="pairs">—</dd></div><div><dt>HSI 缺口</dt><dd id="gaps">—</dd></div>
+      <dl class="meters"><div><dt>M01 完整配对</dt><dd id="pairs">—</dd></div><div><dt>M02 共同覆盖</dt><dd id="m02-total">—</dd></div><div><dt>HSI 缺口</dt><dd id="gaps">—</dd></div>
         <div><dt>晚到证据</dt><dd id="late">—</dd></div><div><dt>E05 观测</dt><dd id="depth-total">—</dd></div>
         <div><dt>M09 校验块</dt><dd id="verified">—</dd></div></dl>
     </section>

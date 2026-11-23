@@ -196,12 +196,18 @@ struct Coverage {
     std::size_t rgb_column{}, hsi_column{};
 };
 
+enum class CoverageStatus {
+    MissingInput, UnusableInput, UnverifiedTime, ExposureSeparation,
+    UnverifiedCount, ReferenceUnavailable, ProjectionUnavailable, OutOfCoverage, Available
+};
+
 struct AlignedTrigger {
     m01::TriggerRecord source;
     std::optional<TimeEstimate> reference_time;
     CountEstimate reference_count;
     std::optional<AlignedObservation> rgb, hsi;
     std::vector<Coverage> common_coverage;
+    CoverageStatus coverage_status{CoverageStatus::MissingInput};
 };
 
 struct Result {

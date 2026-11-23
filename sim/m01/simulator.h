@@ -5,7 +5,10 @@
 
 namespace waste::m01sim {
 
-enum class Scenario { Normal, Missing, Late, Mixed, SlowArchive, Reconnect };
+enum class Scenario {
+    Normal, Missing, Late, Mixed, SlowArchive, Reconnect, TransportDelay, ExposureDelay,
+    Compensated, ExposureLimit, ClockMissing, CountInterpolation, InvalidWhite
+};
 enum class DepthMode { Independent, Encoder };
 
 struct Options {
@@ -18,7 +21,7 @@ struct Options {
 
 struct Report {
     bool passed{};
-    unsigned paired{}, missing{}, late{}, depth{}, verified{};
+    unsigned paired{}, missing{}, late{}, depth{}, verified{}, calibrated{}, covered{};
 };
 
 std::string_view name(Scenario scenario);

@@ -1,3 +1,4 @@
+import { CalibrationView } from './calibration.mjs';
 import { distanceAt, drawAlignedPreview, drawBelt, drawPreview } from './drawing.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -7,7 +8,8 @@ const names = {
   Capacity: '采集缓冲不足', ConsumerBacklog: '消费端积压', MissingSync: '同步记录缺失',
   DuplicateConflict: '重复数据有冲突', InvalidPacket: '封包格式无效', UnknownAssociation: '触发归属待核',
 };
-const significant = new Set(['trigger', 'packet', 'result', 'depth', 'diagnostic', 'archive', 'reconnect', 'seal']);
+const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02-depth', 'diagnostic', 'archive', 'reconnect', 'seal']);
+const calibration = new CalibrationView();
 const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let report = null;
 let selected = 0;
@@ -42,6 +44,7 @@ function showMessage(text) {
 
 function reset() {
   index = 0;
+  calibration.reset();
   seenPackets = 0;
   currentRows = new Map();
   archiveRows = new Map();
@@ -59,6 +62,7 @@ function reset() {
 
 function ingest(event) {
   const data = event.data;
+  calibration.ingest(event);
   if (event.type === 'trigger') {
     latestTrigger = { ...data, t: event.t };
   } else if (event.type === 'reconnect') {
@@ -162,12 +166,14 @@ function paint() {
   $('queue').textContent = health.archiveQueue ?? 0;
   paintTable();
   paintDetail();
+  calibration.paint(selected, meta);
   if (lastColumns !== currentRows.size) {
     lastColumns = currentRows.size;
     for (const sensor of ['rgb', 'hsi']) {
       if (aligned) {
         const samples = [...currentRows.values()].map((row) =>
-          ({ displacementMm: row.displacementMm, pixels: row[sensor + 'Pixels'] }));
+          ({ displacementMm: sensor === 'hsi' ? row.hsiDisplacementMm ?? row.displacementMm : row.displacementMm,
+            scanX: sensor === 'hsi' ? meta.hsiScanX : meta.scanX, pixels: row[sensor + 'Pixels'] }));
         drawAlignedPreview($(sensor), samples, sensor, meta, outline);
       } else {
         const pixels = Array.from(cameraRows, (row) => row?.[sensor + 'Pixels'] ?? null);
@@ -241,12 +247,14 @@ function install(data) {
   $('first-gap').disabled = !firstGap;
   $('geometry').textContent = '每 ' + meta.pitch + ' mm 触发一次 · ' + (meta.speed / 1000).toFixed(1) + ' m/s';
   $('band').textContent = meta.hsiPreviewBand + ' nm 模拟波段 · 伪彩';
-  status(summary.passed ? 'M01 / M09 校验通过' : '校验失败', summary.passed ? 'ok' : 'warn');
+  status(summary.passed ? (summary.m02 ? 'M01 / M02 / M09 校验通过' : 'M01 / M09 校验通过') : '校验失败',
+    summary.passed ? 'ok' : 'warn');
   $('summary').textContent = summary.passed
     ? '已核对原始字节、源帧行和归档引用 · 封存清单 v' + summary.manifest +
       ' · 归档队列峰值 ' + summary.peakArchiveQueue
     : summary.errors.join('；');
   $('pairs').textContent = summary.paired + ' / ' + summary.expected;
+  $('m02-total').textContent = summary.m02 ? summary.m02.covered + ' / ' + summary.m02.processed : '—';
   $('gaps').textContent = summary.missing;
   $('late').textContent = summary.late;
   $('depth-total').textContent = summary.depth;
@@ -318,6 +326,7 @@ function changePreview() {
   lastColumns = lastDepths = -1;
   paint();
 }
+$('calibration-mode').addEventListener('change', paint);
 $('preview-mode').addEventListener('change', changePreview);
 $('preview-outline').addEventListener('change', changePreview);
 paint();

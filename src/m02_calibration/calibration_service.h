@@ -11,12 +11,19 @@ struct SyncWindow {
     std::span<const m01::TriggerEvent> events;
 };
 
+struct ObservationReference {
+    m01::ObservationId observation;
+    m01::TriggerEvent reference;
+};
+
 struct ProcessContext {
     const SyncWindow* sync_window{};
     const Environment* environment{};
     // Optional independent stream alignment to an explicitly selected sync event.
     const m01::TriggerEvent* independent_reference{};
     std::span<const m01::Diagnostic> acquisition_diagnostics;
+    // A binding applies only to its named observation and takes precedence over the default.
+    std::span<const ObservationReference> independent_references{};
 };
 
 struct CoordinateReference {

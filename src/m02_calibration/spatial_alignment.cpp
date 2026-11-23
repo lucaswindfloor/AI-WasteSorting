@@ -94,9 +94,19 @@ std::vector<ProjectedPoint> shift_points(std::span<const ProjectedPoint> measure
 }
 
 std::vector<Coverage> overlap(const Snapshot& snapshot, const AlignedObservation& rgb,
-                              const AlignedObservation& hsi) {
-    if (!rgb.time || !hsi.time || !within_time(*rgb.time, *hsi.time, snapshot.max_exposure_separation)) {
+                              const AlignedObservation& hsi, CoverageStatus* status) {
+    const auto empty = [&](CoverageStatus reason) -> std::vector<Coverage> {
+        if (status) *status = reason;
         return {};
+    };
+    if (!rgb.time || !hsi.time) return empty(CoverageStatus::UnverifiedTime);
+    if (!within_time(*rgb.time, *hsi.time, snapshot.max_exposure_separation)) {
+        return empty(CoverageStatus::ExposureSeparation);
+    }
+    if (rgb.aligned.empty() || hsi.aligned.empty()) {
+        if (rgb.measured.empty() || hsi.measured.empty()) return empty(CoverageStatus::ProjectionUnavailable);
+        if (!rgb.count || !hsi.count) return empty(CoverageStatus::UnverifiedCount);
+        return empty(CoverageStatus::ReferenceUnavailable);
     }
     std::vector<std::size_t> candidates;
     for (std::size_t i = 0; i < hsi.aligned.size(); ++i) {
@@ -135,6 +145,7 @@ std::vector<Coverage> overlap(const Snapshot& snapshot, const AlignedObservation
             result.push_back({i, *best});
         }
     }
+    if (status) *status = result.empty() ? CoverageStatus::OutOfCoverage : CoverageStatus::Available;
     return result;
 }
 

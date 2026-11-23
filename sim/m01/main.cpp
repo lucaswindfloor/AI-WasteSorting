@@ -20,7 +20,9 @@ unsigned bounded(std::string_view input, unsigned lo, unsigned hi) {
 
 Scenario scenario(std::string_view value) {
     for (auto option : {Scenario::Normal, Scenario::Missing, Scenario::Late, Scenario::Mixed,
-                        Scenario::SlowArchive, Scenario::Reconnect}) {
+                        Scenario::SlowArchive, Scenario::Reconnect, Scenario::TransportDelay,
+                        Scenario::ExposureDelay, Scenario::Compensated, Scenario::ExposureLimit,
+                        Scenario::ClockMissing, Scenario::CountInterpolation, Scenario::InvalidWhite}) {
         if (name(option) == value) return option;
     }
     throw std::invalid_argument("unknown scenario");
@@ -53,7 +55,10 @@ Options parse(int argc, char** argv) {
 }
 
 void help() {
-    std::cout << "m01_sim [--scenario normal|missing|late|mixed|slow-archive|reconnect]\n"
+    std::cout << "m01_sim [--scenario NAME]\n"
+                 "        normal|missing|late|mixed|slow-archive|reconnect\n"
+                 "        transport-delay|exposure-delay|compensated|exposure-limit\n"
+                 "        clock-missing|count-interpolation|invalid-white\n"
                  "        [--speed-mm-s 500..3000] [--depth independent|encoder]\n"
                  "        [--rgb-width 16..8192] [--hsi-width 16..640]\n"
                  "        [--hsi-bands 2..224] [--packet-lines 1..8] [--output NEW_DIRECTORY]\n";
@@ -70,6 +75,7 @@ int main(int argc, char** argv) {
         const auto report = run(options);
         std::cout << (report.passed ? "PASS" : "FAIL")
                   << " pairs=" << report.paired << " missing=" << report.missing << " late=" << report.late
+                  << " m02_coverage=" << report.covered << "/" << report.calibrated
                   << " depth=" << report.depth << " verified_archive_blocks=" << report.verified << '\n'
                   << "Report: " << (options.output / "report.json").string() << '\n'
                   << "Ledger: " << (options.output / "ledger.csv").string() << '\n';

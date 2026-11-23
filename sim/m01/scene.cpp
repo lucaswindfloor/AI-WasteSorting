@@ -30,10 +30,10 @@ struct Cut {
     double height{};
 };
 
-Cut sample(double displacement, double lateral) {
+Cut sample(double sensor_x, double displacement, double lateral) {
     for (std::size_t i = 0; i < materials.size(); ++i) {
         const auto& item = materials[i];
-        const auto x = scan_x - item.x - displacement;
+        const auto x = sensor_x - item.x - displacement;
         const auto y = lateral - item.y;
         if (std::abs(x) >= item.length / 2) continue;
         const auto along = x / item.length + 0.5;
@@ -76,11 +76,11 @@ std::vector<std::string> wavelengths(unsigned bands) {
     return values;
 }
 
-Scan scan(m01::Source source, const Profile& profile, double displacement, bool mask_depth) {
+Scan scan(m01::Source source, const Profile& profile, double displacement, bool mask_depth, double sensor_x) {
     Scan out;
     const auto width = width_for(source, profile);
     for (unsigned i = 0; i < width; ++i) {
-        const auto cut = sample(displacement, (i + 0.5) * belt_width / width);
+        const auto cut = sample(sensor_x, displacement, (i + 0.5) * belt_width / width);
         const auto stripe = i % 9;
         if (source == m01::Source::Rgb) {
             const std::array palettes{std::array{22u, 34u, 47u}, std::array{41u, 189u, 229u},

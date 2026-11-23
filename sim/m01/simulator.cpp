@@ -1,10 +1,12 @@
 #include "simulator.h"
+#include "calibration.h"
 
 #include "m01_acquisition/acquisition_service.h"
 #include "m09_archive/adapters/m01_capture_adapter.h"
 #include "m09_archive/evidence/evidence_index.h"
 
 #include <algorithm>
+#include <cmath>
 #include <deque>
 #include <fstream>
 #include <iomanip>
@@ -199,6 +201,85 @@ std::string describe_row(const std::optional<m01::Observation>& row) {
         {"bytes", std::to_string(h.bytes.size)}});
 }
 
+std::string decimal(double value) { return std::isfinite(value) ? std::to_string(value) : "null"; }
+
+std::string point(const m02::ProjectedPoint& p, std::size_t column) {
+    return "[" + decimal(p.position.x) + ',' + decimal(p.position.y) + ',' + decimal(p.position.z) +
+           ',' + quote(quality(p.quality)) + ',' + std::to_string(column) + ']';
+}
+
+template<class Format>
+std::string sample_columns(std::size_t width, Format format) {
+    std::vector<std::size_t> columns;
+    const auto limit = std::min<std::size_t>(width, preview_width);
+    for (std::size_t i = 0; i < limit; ++i) columns.push_back((2 * i + 1) * width / (2 * limit));
+    return array(columns, format);
+}
+
+std::string_view count_name(m02::CountBasis basis) {
+    switch (basis) {
+    case m02::CountBasis::TriggerLatch: return "trigger";
+    case m02::CountBasis::SourceExposureLatch: return "exposure";
+    case m02::CountBasis::Interpolation: return "interpolation";
+    }
+    return {};
+}
+
+std::string describe_alignment(const m02::AlignedObservation* row) {
+    if (!row) return "null";
+    const auto data = [&](const auto& pixels) {
+        return sample_columns(pixels.size(), [&](auto i) { return point(pixels[i], i); });
+    };
+    const auto& identity = row->source.header.id;
+    return object({{"frame", std::to_string(identity.frame)}, {"row", std::to_string(identity.row)},
+        {"session", std::to_string(identity.session)}, {"receivedMs", time(row->source.received)},
+        {"exposureMs", row->time ? time(row->time->value) : "null"},
+        {"exposureErrorMs", row->time ? time(row->time->error) : "null"},
+        {"referenceMs", row->reference_time ? time(row->reference_time->value) : "null"},
+        {"count", row->count ? decimal(static_cast<double>(row->count->value)) : "null"},
+        {"countBasis", row->count ? quote(count_name(row->count->basis)) : "null"},
+        {"shiftMm", row->shift ? decimal(row->shift->mm) : "null"},
+        {"shiftErrorMm", row->shift ? decimal(row->shift->error_mm) : "null"},
+        {"issue", quote(row->issue)}, {"measured", data(row->measured)}, {"aligned", data(row->aligned)}});
+}
+
+struct SpectralSample {
+    unsigned column{}, raw{};
+    std::optional<double> corrected;
+    std::string_view reason;
+};
+
+SpectralSample spectral_sample(const m02::AlignedObservation& row, unsigned width, unsigned bands) {
+    const auto band = bands / 2;
+    const auto& source = row.source;
+    const auto bytes = std::span(*source.payload).subspan(source.header.bytes.offset, source.header.bytes.size);
+    SpectralSample out;
+    for (unsigned column = 0; column < width; ++column) {
+        const auto index = 2 * (column * bands + band);
+        const auto raw = std::to_integer<unsigned>(bytes[index]) + 256 * std::to_integer<unsigned>(bytes[index + 1]);
+        if (column == 0 || raw > out.raw) {
+            out.column = column;
+            out.raw = raw;
+        }
+    }
+    if (!row.spectrum) return out;
+    const auto& spectrum = *row.spectrum;
+    const auto index = out.column * bands + band;
+    if (!spectrum.reason.empty()) out.reason = spectrum.reason;
+    else if (index < spectrum.quality.size()) {
+        if (spectrum.quality[index] == m02::Quality::Valid) {
+            out.corrected = spectrum.samples[index];
+        } else {
+            switch (spectrum.sample_issues[index]) {
+            case m02::SpectralIssue::InvalidReference: out.reason = "invalid_reference"; break;
+            case m02::SpectralIssue::Saturated: out.reason = "saturated"; break;
+            default: out.reason = "invalid_sample"; break;
+            }
+        }
+    }
+    return out;
+}
+
 class Simulation {
 public:
     explicit Simulation(const Options& options)
@@ -211,6 +292,10 @@ private:
     const Options& opts_;
     Tick interval_;
     m01::AcquisitionService acq_;
+    m02::CalibrationService m02_;
+    std::vector<m01::TriggerEvent> sync_window_;
+    std::map<unsigned, m02::CoverageStatus> coverage_;
+    unsigned projected_depth_{}, e05_zero_points_{}, e05_masked_points_{}, spectrum_valid_{};
     m09::ArchiveService archive_;
     m09::M01CaptureAdapter capture_;
     std::vector<Session> sessions_;
@@ -227,6 +312,10 @@ private:
     void run_session(const Session& session, const Session* previous);
     void deliver(const Session& session, const Event& event);
     void accept(Tick now, m01::Output output);
+    void calibrate(Tick now, const Session& session, const std::shared_ptr<const m01::Segment>& segment,
+                   std::span<const m01::Diagnostic> diagnostics);
+    double displacement(const Session& session, Tick exposure) const;
+    Tick exposure_at(const Session& session, Source source, unsigned local) const;
     void archive_until(Tick now);
     void observe_health(Tick now);
     Report verify();
@@ -255,6 +344,8 @@ void Simulation::check(bool value, std::string problem) {
 }
 
 void Simulation::run_session(const Session& session, const Session* previous) {
+    m02_.install(calibration(session.config, opts_.scenario, interval_));
+    sync_window_.clear();
     acq_.start(session.config, session.start);
     log(session.start, previous ? "reconnect" : "start",
         object({{"generation", std::to_string(session.config.generation)},
@@ -288,10 +379,18 @@ void Simulation::run_session(const Session& session, const Session* previous) {
         const auto hsi_delay = ((first - 1) / group_size % 2 == 0 ? 160us : 900us) +
                               Tick(hsi.size() * opts_.profile.hsi_width * opts_.profile.hsi_bands * 4);
         events.push_back({exposed + rgb_delay, exposed, Input::Rgb, std::move(rgb)});
-        if (!hsi.empty()) events.push_back({exposed + hsi_delay, exposed, Input::Hsi, std::move(hsi)});
+        if (!hsi.empty()) {
+            const auto hsi_exposed = exposure_at(session, Source::Hsi, last);
+            auto arrival = hsi_exposed + hsi_delay + hsi_transport_delay(opts_.scenario);
+            if (opts_.scenario == Scenario::CountInterpolation && std::ranges::find(hsi, 100u) != hsi.end()) {
+                arrival = std::max(arrival, session.start + 101 * interval_ + 351us);
+            }
+            events.push_back({arrival, hsi_exposed, Input::Hsi, std::move(hsi)});
+        }
     }
     if (opts_.depth == DepthMode::Independent) {
-        for (auto elapsed = Tick(12ms); elapsed <= duration; elapsed += 12ms) {
+        const auto belt_stops = duration + hsi_exposure_delay(opts_.scenario, interval_);
+        for (auto elapsed = Tick(12ms); elapsed <= belt_stops; elapsed += 12ms) {
             const auto exposure = session.start + elapsed;
             events.push_back({exposure + 760us, exposure, Input::Depth, {}, ++depth_expected_});
         }
@@ -317,6 +416,16 @@ void Simulation::run_session(const Session& session, const Session* previous) {
     observe_health(stop);
 }
 
+double Simulation::displacement(const Session& session, Tick exposure) const {
+    const auto steps = static_cast<double>((exposure - session.start).count()) / interval_.count();
+    return (session.base + steps) * pitch_mm;
+}
+
+Tick Simulation::exposure_at(const Session& session, Source source, unsigned local) const {
+    return session.start + local * interval_ +
+           (source == Source::Hsi ? hsi_exposure_delay(opts_.scenario, interval_) : 0ns);
+}
+
 void Simulation::deliver(const Session& session, const Event& event) {
     const auto& conf = session.config;
     if (event.input == Input::Advance) {
@@ -336,6 +445,9 @@ void Simulation::deliver(const Session& session, const Event& event) {
                 m01::SourceTime{"sim-encoder-clock", event.exposure.count()}}, event.at};
             log(event.at, "packet", object({{"source", quote("SYNC")}, {"triggers", integers(std::array{session.base + local})},
                                            {"bytes", "0"}, {"generation", std::to_string(conf.generation)}}));
+            // These are the synchronized trigger events the simulator has actually delivered so far.
+            sync_window_.push_back(sync.event);
+            if (sync_window_.size() > 48) sync_window_.erase(sync_window_.begin());
             accept(event.at, acq_.ingest(sync, event.at));
         }
         return;
@@ -348,11 +460,10 @@ void Simulation::deliver(const Session& session, const Event& event) {
     const auto depth = source == Source::E05;
     const auto lane = depth ? std::vector{event.lines.empty() ? 0u : event.lines.front()} : event.lines;
     for (auto local : lane) {
-        const auto acquired = depth ? event.exposure :
-            event.old ? event.exposure : session.start + local * interval_;
-        const auto steps = static_cast<double>((acquired - session.start).count()) / interval_.count();
-        const auto distance = (session.base + steps) * pitch_mm;
-        auto signal = scan(source, opts_.profile, distance, depth && event.frame % 7 == 0);
+        const auto acquired = depth || event.old ? event.exposure : exposure_at(session, source, local);
+        const auto scan_at = source == Source::Hsi ? hsi_scan_position(opts_.scenario, interval_) : scan_x;
+        auto signal = scan(source, opts_.profile, displacement(session, acquired),
+                           depth && event.frame % 7 == 0, scan_at);
         m01::ObservationHeader h;
         h.id = depth ? m01::ObservationId{source, device.session, 8000 + event.frame, 0}
                      : id_for(session, source, local);
@@ -361,11 +472,13 @@ void Simulation::deliver(const Session& session, const Event& event) {
             h.association_verified = true;
             triggers.push_back(session.base + local);
         }
-        const auto offset = source == Source::Rgb ? 71us : source == Source::Hsi ? 183us : 427us;
-        h.source_time = m01::SourceTime{device.device_id + "-clock", (acquired + offset).count()};
-        h.time_basis = "simulated sensor exposure";
-        h.encoder_count = static_cast<std::int64_t>(steps * encoder_counts_per_line);
-        h.encoder_epoch = conf.encoder_epoch;
+        h.source_time = m01::SourceTime{device.device_id + "-clock", (acquired + clock_offset(source)).count()};
+        h.time_basis = exposure_basis;
+        if (source != Source::Hsi || hsi_has_native_count(opts_.scenario, session.base + local)) {
+            const auto steps = static_cast<double>((acquired - session.start).count()) / interval_.count();
+            h.encoder_count = std::llround(steps * encoder_counts_per_line);
+            h.encoder_epoch = conf.encoder_epoch;
+        }
         h.bytes = {bytes.size(), signal.data_bytes};
         if (signal.mask) h.valid_mask = m01::ByteRange{bytes.size() + signal.mask->offset, signal.mask->size};
         headers.push_back(std::move(h));
@@ -405,6 +518,7 @@ void Simulation::accept(Tick now, m01::Output output) {
                 check(ledger_.emplace(global, row).second, "duplicate M01 result for trigger " + std::to_string(global));
                 log(now, "result", object({{"trigger", std::to_string(global)}, {"local", std::to_string(local)},
                     {"displacementMm", std::to_string(global * pitch_mm)},
+                    {"hsiDisplacementMm", std::to_string(displacement(session, exposure_at(session, Source::Hsi, local)))},
                     {"count", std::to_string(row.count)}, {"generation", std::to_string(row.generation)},
                     {"segment", std::to_string(row.segment)}, {"syncReceivedMs", time(p->received)},
                     {"rgbQuality", quote(quality(p->rgb_quality))}, {"hsiQuality", quote(quality(p->hsi_quality))},
@@ -433,6 +547,7 @@ void Simulation::accept(Tick now, m01::Output output) {
                     {"masked", std::to_string(mask)}, {"pixels", integers(pixels)}}));
             }
         }
+        calibrate(now, session, segment, output.diagnostics);
     }
     if (output.segments.empty() && output.diagnostics.empty()) return;
     // This queue owns references until the actual archive call returns.
@@ -440,6 +555,86 @@ void Simulation::accept(Tick now, m01::Output output) {
     next_archive_ = std::max(now, next_archive_) + delay;
     pending_.push_back({next_archive_, std::move(output)});
     peak_pending_ = std::max(peak_pending_, static_cast<unsigned>(pending_.size()));
+}
+
+void Simulation::calibrate(Tick now, const Session& session, const std::shared_ptr<const m01::Segment>& segment,
+                           std::span<const m01::Diagnostic> diagnostics) {
+    const auto& config = session.config;
+    const m02::SyncWindow window{config.run_id, config.generation, sync_window_};
+    const m02::Environment environment{config.run_id, config.generation, std::string(calibration_settings),
+                                       session.start, 22, 5, true};
+    std::vector<m02::ObservationReference> references;
+    for (const auto& item : segment->items) {
+        const auto* row = std::get_if<m01::Observation>(&item);
+        if (!row || row->header.id.source != Source::E05 || !row->header.trigger) continue;
+        const auto trigger = std::ranges::find(sync_window_, *row->header.trigger, &m01::TriggerEvent::key);
+        if (trigger != sync_window_.end()) references.push_back({row->header.id, *trigger});
+    }
+    const auto result = m02_.process(segment, {&window, &environment, nullptr, diagnostics, references});
+    if (!result.issue.empty() || !result.snapshot) {
+        check(false, "M02 could not process generation " + std::to_string(config.generation) + ": " +
+                     std::string(result.issue));
+        return;
+    }
+    const auto& versions = result.snapshot->versions;
+    for (const auto& group : result.triggers) {
+        const auto global = static_cast<unsigned>(session.base + group.source.event.key.id);
+        check(coverage_.emplace(global, group.coverage_status).second,
+              "duplicate M02 result for trigger " + std::to_string(global));
+        const auto* rgb = group.rgb ? &*group.rgb : nullptr;
+        const auto* hsi = group.hsi ? &*group.hsi : nullptr;
+        std::string spectrum = "null";
+        if (hsi) {
+            const auto sample = spectral_sample(*hsi, opts_.profile.hsi_width, opts_.profile.hsi_bands);
+            if (sample.corrected) ++spectrum_valid_;
+            spectrum = object({{"column", std::to_string(sample.column)}, {"raw", std::to_string(sample.raw)},
+                {"corrected", sample.corrected ? decimal(*sample.corrected) : "null"},
+                {"reason", quote(sample.reason)}, {"reference", quote(versions.spectral_reference)}});
+            const bool should_correct = opts_.scenario != Scenario::InvalidWhite && opts_.scenario != Scenario::ClockMissing;
+            check(sample.corrected.has_value() == should_correct &&
+                  (!sample.corrected || std::abs(*sample.corrected - (sample.raw - 100.0) / 30000) < 1e-8),
+                  "M02 spectral sample mismatch for trigger " + std::to_string(global));
+            if (opts_.scenario != Scenario::ClockMissing) {
+                const auto delay = hsi_exposure_delay(opts_.scenario, interval_);
+                check(rgb && rgb->time && hsi->time && hsi->time->value - rgb->time->value == delay,
+                      "M02 exposure time mismatch for trigger " + std::to_string(global));
+                if (opts_.scenario != Scenario::CountInterpolation || global != trigger_count) {
+                    const auto expected_shift = -pitch_mm * delay.count() / interval_.count();
+                    check(hsi->shift && std::abs(hsi->shift->mm - expected_shift) <= 0.026,
+                          "M02 along-belt shift mismatch for trigger " + std::to_string(global));
+                }
+            }
+        }
+        const auto pairs = sample_columns(group.common_coverage.size(), [&](auto i) {
+            const auto& pair = group.common_coverage[i];
+            return "[" + point(rgb->aligned[pair.rgb_column], pair.rgb_column) + ',' +
+                         point(hsi->aligned[pair.hsi_column], pair.hsi_column) + ']';
+        });
+        log(now, "m02", object({{"trigger", std::to_string(global)}, {"generation", std::to_string(config.generation)},
+            {"segment", std::to_string(segment->sequence)}, {"geometry", quote(versions.geometry)},
+            {"clock", quote(versions.clock)}, {"encoder", quote(versions.encoder)},
+            {"referenceMs", group.reference_time ? time(group.reference_time->value) : "null"},
+            {"referenceCount", decimal(static_cast<double>(group.reference_count.value))},
+            {"exposureLimitMs", time(result.snapshot->max_exposure_separation)},
+            {"status", quote(name(group.coverage_status))}, {"coverage", std::to_string(group.common_coverage.size())},
+            {"rgb", describe_alignment(rgb)}, {"hsi", describe_alignment(hsi)}, {"pairs", pairs}, {"spectrum", spectrum}}));
+    }
+    for (const auto& row : result.independent) {
+        if (row.source.header.id.source != Source::E05) continue;
+        const auto count = [&](auto predicate) { return std::ranges::count_if(row.measured, predicate); };
+        const auto zeros = count([](const auto& p) { return p.quality == m02::Quality::Valid && p.position.z == 0; });
+        const auto masked = count([](const auto& p) { return p.quality == m02::Quality::Missing; });
+        const auto valid = count([](const auto& p) { return p.quality == m02::Quality::Valid; });
+        const auto trigger = row.source.header.trigger ? session.base + row.source.header.trigger->id : 0;
+        check(row.time && row.count && valid && (!trigger || row.shift),
+              "M02 E05 projection/reference mismatch for frame " + std::to_string(row.source.header.id.frame));
+        if (valid) ++projected_depth_;
+        e05_zero_points_ += zeros;
+        e05_masked_points_ += masked;
+        log(now, "m02-depth", object({{"generation", std::to_string(config.generation)},
+            {"trigger", std::to_string(trigger)}, {"geometry", quote(versions.geometry)}, {"valid", std::to_string(valid)},
+            {"zeros", std::to_string(zeros)}, {"masked", std::to_string(masked)}, {"observation", describe_alignment(&row)}}));
+    }
 }
 
 void Simulation::archive_until(Tick until) {
@@ -493,6 +688,13 @@ Report Simulation::verify() {
     check(ledger_.size() == trigger_count, "unexpected number of unique M01 trigger records");
     check(depth_.size() == depth_expected_, "E05 sample count mismatched");
     out.depth = static_cast<unsigned>(depth_.size());
+    out.calibrated = static_cast<unsigned>(coverage_.size());
+    out.covered = std::ranges::count_if(coverage_, [](const auto& trigger) {
+        return trigger.second == m02::CoverageStatus::Available;
+    });
+    check(out.calibrated == trigger_count, "unexpected number of M02 trigger results");
+    check(projected_depth_ == depth_expected_ && e05_zero_points_ && e05_masked_points_,
+          "M02 E05 projections, valid zeros or masks were lost");
     out.late = diagnostics_[m01::Issue::Late];
     check(out.late == static_cast<unsigned>(late(late_line)), "late diagnostic count mismatched");
     for (const auto& [issue, count] : diagnostics_) {
@@ -527,7 +729,9 @@ Report Simulation::verify() {
         const auto found = index.native.find({device.device_id, std::to_string(id.session), id.frame, id.row});
         if (found == index.native.end() || found->second.size() != 1) return false;
         const auto read = archive_.raw(manifest, found->second.front());
-        const auto expected = scan(source, opts_.profile, (session.base + local) * pitch_mm, false);
+        const auto scan_at = source == Source::Hsi ? hsi_scan_position(opts_.scenario, interval_) : scan_x;
+        const auto expected = scan(source, opts_.profile, displacement(session, exposure_at(session, source, local)),
+                                   false, scan_at);
         if (!read.value || *read.value != expected.bytes) return false;
         ++out.verified;
         return true;
@@ -565,6 +769,16 @@ Report Simulation::verify() {
             if (actual.hsi_quality == m01::Quality::Missing) ++out.missing;
             if (actual.rgb_quality == m01::Quality::Valid && actual.hsi_quality == m01::Quality::Valid) ++out.paired;
 
+            using enum m02::CoverageStatus;
+            auto expected = Available;
+            if (drop || delayed) expected = MissingInput;
+            else if (opts_.scenario == Scenario::ClockMissing) expected = UnverifiedTime;
+            else if (opts_.scenario == Scenario::ExposureLimit) expected = ExposureSeparation;
+            else if (opts_.scenario == Scenario::ExposureDelay) expected = OutOfCoverage;
+            else if (opts_.scenario == Scenario::CountInterpolation && global == trigger_count) expected = UnverifiedCount;
+            const auto status = coverage_.find(global);
+            check(status != coverage_.end() && status->second == expected, "M02 common coverage mismatch" + label);
+
             const auto key = m09::capture_trigger_id(trigger_key(session, local));
             const auto saved = archived_triggers.find(key);
             check(saved != archived_triggers.end() && saved->second->raw.size() == (drop || delayed ? 1u : 2u) &&
@@ -598,6 +812,9 @@ Report Simulation::verify() {
 void Simulation::write(const Report& report, std::uint64_t version, std::size_t gaps) {
     std::ranges::stable_sort(trace_, {}, &Trace::at);
     const auto& p = opts_.profile;
+    const auto m02_summary = object({{"processed", std::to_string(report.calibrated)}, {"covered", std::to_string(report.covered)},
+        {"depthProjected", std::to_string(projected_depth_)}, {"validZeroPoints", std::to_string(e05_zero_points_)},
+        {"maskedPoints", std::to_string(e05_masked_points_)}, {"spectralValid", std::to_string(spectrum_valid_)}});
     const auto summary = object({{"passed", yes(report.passed)}, {"expected", std::to_string(trigger_count)},
         {"finalized", std::to_string(ledger_.size())}, {"paired", std::to_string(report.paired)},
         {"missing", std::to_string(report.missing)}, {"late", std::to_string(report.late)},
@@ -605,12 +822,14 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"depth", std::to_string(report.depth)}, {"segments", std::to_string(archive_count_)},
         {"manifest", std::to_string(version)}, {"archiveGaps", std::to_string(gaps)},
         {"verifiedBlocks", std::to_string(report.verified)}, {"peakArchiveQueue", std::to_string(peak_pending_)},
-        {"peakBytes", std::to_string(peak_bytes_)},
+        {"peakBytes", std::to_string(peak_bytes_)}, {"m02", m02_summary},
         {"errors", array(errors_, [](const auto& error) { return quote(error); })}});
     const auto meta = object({{"scenario", quote(name(opts_.scenario))}, {"speed", std::to_string(opts_.speed_mm_s)},
         {"pitch", std::to_string(pitch_mm)}, {"depthMode", quote(opts_.depth == DepthMode::Encoder ? "encoder" : "independent")},
         {"durationMs", time(latest_)}, {"beltWidth", std::to_string(belt_width)}, {"scanX", std::to_string(scan_x)},
+        {"hsiScanX", std::to_string(hsi_scan_position(opts_.scenario, interval_))},
         {"travel", std::to_string(travel)}, {"previewWidth", std::to_string(preview_width)},
+        {"previewTravel", decimal(travel + pitch_mm * hsi_exposure_delay(opts_.scenario, interval_).count() / interval_.count())},
         {"rgbWidth", std::to_string(p.rgb_width)}, {"hsiWidth", std::to_string(p.hsi_width)},
         {"hsiBands", std::to_string(p.hsi_bands)}, {"depthWidth", std::to_string(p.depth_width)},
         {"hsiPreviewBand", quote(wavelengths(p.hsi_bands)[p.hsi_bands / 2])},
@@ -623,8 +842,9 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
                 })}});
         })},
         {"motion", array(sessions_, [&](const Session& session) {
-            return object({{"startMs", time(session.start)}, {"endMs", time(session.start + interval_ * session.count)},
-                {"begin", std::to_string(session.base * pitch_mm)}, {"end", std::to_string((session.base + session.count) * pitch_mm)}});
+            const auto stop = exposure_at(session, Source::Hsi, session.count);
+            return object({{"startMs", time(session.start)}, {"endMs", time(stop)},
+                {"begin", std::to_string(session.base * pitch_mm)}, {"end", decimal(displacement(session, stop))}});
         })}});
     std::ofstream data(opts_.output / "report.json", std::ios::binary);
     data << "{\"schema\":1,\"meta\":" << meta << ",\"events\":[\n";
@@ -690,6 +910,13 @@ std::string_view name(Scenario scenario) {
     case Scenario::Mixed: return "mixed";
     case Scenario::SlowArchive: return "slow-archive";
     case Scenario::Reconnect: return "reconnect";
+    case Scenario::TransportDelay: return "transport-delay";
+    case Scenario::ExposureDelay: return "exposure-delay";
+    case Scenario::Compensated: return "compensated";
+    case Scenario::ExposureLimit: return "exposure-limit";
+    case Scenario::ClockMissing: return "clock-missing";
+    case Scenario::CountInterpolation: return "count-interpolation";
+    case Scenario::InvalidWhite: return "invalid-white";
     }
     return {};
 }

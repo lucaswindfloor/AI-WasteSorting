@@ -2,6 +2,7 @@
 
 import csv
 import json
+import math
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -37,8 +38,9 @@ def check_geometry(data):
         row = event["data"]
         if event["type"] == "result":
             assert row["displacementMm"] == row["trigger"] * meta["pitch"]
-            x = meta["scanX"] - row["displacementMm"]
             for sensor in ("rgb", "hsi"):
+                x = (meta["hsiScanX"] - row["hsiDisplacementMm"] if sensor == "hsi"
+                     else meta["scanX"] - row["displacementMm"])
                 pixels = row[sensor + "Pixels"]
                 if not pixels:
                     assert sensor == "hsi" and row["hsiQuality"] == "missing"
@@ -61,13 +63,71 @@ def check_geometry(data):
             assert abs(row["displacementMm"] - expected) < 1e-5
 
 
-def run_case(binary, root, scenario, args, expected):
+def check_calibration(data, expected):
+    rows = {event["data"]["trigger"]: event["data"] for event in data["events"] if event["type"] == "m02"}
+    metrics = data["summary"]["m02"]
+    assert len(rows) == metrics["processed"] == 240 and metrics["covered"] == expected
+    e05 = [event["data"] for event in data["events"] if event["type"] == "m02-depth"]
+    assert len(e05) == metrics["depthProjected"] == data["summary"]["depth"]
+    assert metrics["validZeroPoints"] > 0 and metrics["maskedPoints"] > 0
+    for depth in e05:
+        assert depth["observation"]["exposureMs"] < depth["observation"]["receivedMs"]
+        if depth["trigger"]:
+            assert depth["observation"]["shiftMm"] == 0
+            assert depth["observation"]["aligned"]
+        else:
+            assert depth["observation"]["shiftMm"] is None
+    scenario = data["meta"]["scenario"]
+    duration = 0 if scenario == "transport-delay" else 1
+    sample = rows[100]
+    for sensor in ("rgb", "hsi"):
+        width = data["meta"][sensor + "Width"]
+        scan_x = data["meta"]["hsiScanX" if sensor == "hsi" else "scanX"]
+        for x, y, z, quality, column in sample[sensor]["measured"]:
+            assert quality == "valid" and z == 0
+            assert math.isclose(x, scan_x, abs_tol=1e-6)
+            assert math.isclose(y, (column + 0.5) * data["meta"]["beltWidth"] / width, abs_tol=1e-6)
+    if scenario in {"transport-delay", "exposure-delay", "compensated", "exposure-limit"}:
+        assert math.isclose(sample["hsi"]["exposureMs"] - sample["rgb"]["exposureMs"], duration, abs_tol=1e-6)
+        assert sample["hsi"]["shiftMm"] == -2 * duration
+        assert sample["hsi"]["aligned"][0][0] == (140 if scenario == "exposure-delay" else 142)
+    if scenario == "transport-delay":
+        assert sample["hsi"]["receivedMs"] > sample["rgb"]["receivedMs"]
+        assert sample["status"] == "available"
+    if scenario == "exposure-delay":
+        assert sample["status"] == "out_of_coverage" and not sample["pairs"]
+    if scenario == "compensated":
+        assert sample["hsi"]["measured"][0][0] == 144 and sample["pairs"]
+    if scenario == "exposure-limit":
+        assert sample["status"] == "exposure_separation" and not sample["pairs"]
+    if scenario == "clock-missing":
+        assert all(row["status"] == "unverified_time" and row["hsi"]["exposureMs"] is None for row in rows.values())
+    if scenario == "count-interpolation":
+        assert sample["hsi"]["countBasis"] == "interpolation"
+        assert abs(sample["hsi"]["count"] - 3015) <= 0.01
+        assert rows[240]["status"] == "unverified_count"
+    if scenario == "invalid-white":
+        assert metrics["spectralValid"] == 0 and sample["spectrum"]["reason"] == "invalid_reference"
+    elif scenario != "clock-missing":
+        spectrum = sample["spectrum"]
+        assert math.isclose(spectrum["corrected"], (spectrum["raw"] - 100) / 30000, abs_tol=1e-6)
+    if scenario in {"missing", "mixed"}:
+        assert rows[87]["status"] == "missing_input"
+    if scenario in {"late", "mixed"}:
+        assert rows[153]["status"] == "missing_input"
+    if scenario == "reconnect":
+        assert rows[120]["geometry"] != rows[121]["geometry"]
+        assert rows[120]["generation"] == 1 and rows[121]["generation"] == 2
+
+
+def run_case(binary, root, scenario, args, expected, covered):
     out = root / scenario
     command = [binary, "--scenario", scenario, "--output", str(out), *args]
     run = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert run.returncode == 0, f"{scenario}: {run.stdout}\n{run.stderr}"
     data = json.loads((out / "report.json").read_text())
     check_geometry(data)
+    check_calibration(data, covered)
     summary = data["summary"]
     assert summary["passed"] and not summary["errors"], summary
     assert (summary["paired"], summary["missing"], summary["late"], summary["rejectedOld"]) == expected
@@ -99,19 +159,26 @@ def run_case(binary, root, scenario, args, expected):
         assert all(item["trigger"] == 0 for item in depths)
     final_health = next(event["data"] for event in reversed(data["events"]) if event["type"] == "health")
     assert final_health["bytes"] == 0 and final_health["inflight"] == final_health["archiveQueue"] == 0
-    print(f"{scenario}: {summary['paired']} pairs, {summary['verifiedBlocks']} checked archive blocks")
+    print(f"{scenario}: {summary['paired']} pairs, {covered} common-coverage triggers, {summary['verifiedBlocks']} checked archive blocks")
     return data
 
 
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     cases = [
-        ("normal", ["--packet-lines", "1", "--speed-mm-s", "3000"], (240, 0, 0, 0)),
-        ("missing", ["--speed-mm-s", "500"], (239, 1, 0, 0)),
-        ("late", ["--speed-mm-s", "2000", "--packet-lines", "8"], (239, 1, 1, 0)),
-        ("mixed", [], (238, 2, 1, 0)),
-        ("slow-archive", ["--packet-lines", "4", "--depth", "encoder"], (240, 0, 0, 0)),
-        ("reconnect", ["--depth", "encoder", "--speed-mm-s", "2000"], (240, 0, 0, 1)),
+        ("normal", ["--packet-lines", "1", "--speed-mm-s", "3000"], (240, 0, 0, 0), 240),
+        ("missing", ["--speed-mm-s", "500"], (239, 1, 0, 0), 239),
+        ("late", ["--speed-mm-s", "2000", "--packet-lines", "8"], (239, 1, 1, 0), 239),
+        ("mixed", [], (238, 2, 1, 0), 238),
+        ("slow-archive", ["--packet-lines", "4", "--depth", "encoder"], (240, 0, 0, 0), 240),
+        ("reconnect", ["--depth", "encoder", "--speed-mm-s", "2000"], (240, 0, 0, 1), 240),
+        ("transport-delay", ["--speed-mm-s", "2000"], (240, 0, 0, 0), 240),
+        ("exposure-delay", ["--speed-mm-s", "2000"], (240, 0, 0, 0), 0),
+        ("compensated", ["--speed-mm-s", "2000"], (240, 0, 0, 0), 240),
+        ("exposure-limit", ["--speed-mm-s", "2000"], (240, 0, 0, 0), 0),
+        ("clock-missing", [], (240, 0, 0, 0), 0),
+        ("count-interpolation", [], (240, 0, 0, 0), 239),
+        ("invalid-white", [], (240, 0, 0, 0), 240),
     ]
     with TemporaryDirectory(prefix="waste-m01-sim-test-") as path:
         root = Path(path)
@@ -124,7 +191,7 @@ def main():
         again = subprocess.run([binary, "--output", str(root / "again")], capture_output=True, timeout=90)
         assert again.returncode == 0
         assert json.loads((root / "again" / "report.json").read_text()) == reports[3]
-    print("M01 simulator regression passed")
+    print("M01/M02 simulator regression passed")
 
 
 if __name__ == "__main__":

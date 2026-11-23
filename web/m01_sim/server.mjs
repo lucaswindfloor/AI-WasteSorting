@@ -12,7 +12,9 @@ const binary = resolve(process.env.M01_SIM_BINARY || join(repo, 'build/m01_sim')
 const output = resolve(process.env.M01_SIM_RUNS || join(repo, 'build/m01-sim-runs'));
 const port = Number(process.env.M01_SIM_PORT || '8081');
 const runFile = /^\/runs\/([0-9a-f-]{36})\/(report\.json|ledger\.csv)$/u;
-const scenarios = new Set(['normal', 'missing', 'late', 'mixed', 'slow-archive', 'reconnect']);
+const scenarios = new Set(['normal', 'missing', 'late', 'mixed', 'slow-archive', 'reconnect',
+  'transport-delay', 'exposure-delay', 'compensated', 'exposure-limit', 'clock-missing',
+  'count-interpolation', 'invalid-white']);
 const devices = new Map([
   ['demo', ['96', '80', '16']],
   ['wide', ['256', '128', '32']],
@@ -22,6 +24,7 @@ const assets = new Map([
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/app.mjs', ['app.mjs', 'text/javascript; charset=utf-8']],
   ['/drawing.mjs', ['drawing.mjs', 'text/javascript; charset=utf-8']],
+  ['/calibration.mjs', ['calibration.mjs', 'text/javascript; charset=utf-8']],
 ]);
 const execute = promisify(execFile);
 const security = {

@@ -105,7 +105,15 @@ export function drawBelt(canvas, meta, now, pulse, packet, diagnostic) {
   ctx.restore();
   line(ctx, scanner, 86, scanner, 62, scanColor, 2);
   box(ctx, scanner - 99, 22, 198, 41, 8, '#18354a', scanColor);
-  text(ctx, 'RGB + HSI 共同扫描线', scanner - 83, 48, '#b4ecf6', 15);
+  const hsi = meta?.hsiScanX ?? scanX;
+  const label = hsi === scanX ? 'RGB + HSI 共同扫描线' : 'RGB / HSI 扫描线';
+  text(ctx, label, scanner - 83, 48, '#b4ecf6', 15);
+  if (hsi !== scanX) {
+    ctx.setLineDash([3, 6]);
+    line(ctx, x(hsi), 104, x(hsi), 292, '#c8a5ff');
+    ctx.setLineDash([]);
+    text(ctx, 'HSI 下游 ' + (hsi - scanX).toFixed(2) + ' mm', scanner + 112, 48, '#c8a5ff', 13);
+  }
   line(ctx, 63, 334, 180, 334, colors.dim, 2);
   line(ctx, 173, 327, 180, 334, colors.dim, 2);
   line(ctx, 173, 341, 180, 334, colors.dim, 2);
@@ -170,23 +178,24 @@ export function drawAlignedPreview(canvas, samples, sensor, meta, outline) {
   ctx.fillStyle = '#0b1523';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (!meta) return;
-  const { scanX, pitch, travel, beltWidth, previewWidth } = meta;
-  const scale = Math.min((canvas.width - 32) / travel, (canvas.height - 32) / beltWidth);
-  const left = (canvas.width - travel * scale) / 2;
+  const { scanX, pitch, beltWidth, previewWidth } = meta;
+  const extent = meta.previewTravel ?? meta.travel;
+  const scale = Math.min((canvas.width - 32) / extent, (canvas.height - 32) / beltWidth);
+  const left = (canvas.width - extent * scale) / 2;
   const top = 8;
-  const origin = scanX - travel;
+  const origin = scanX - extent;
   const x = (mm) => left + (mm - origin) * scale;
   const y = (mm) => top + mm * scale;
   const step = beltWidth / previewWidth;
-  box(ctx, left, top, travel * scale, beltWidth * scale, 0, '#142237');
+  box(ctx, left, top, extent * scale, beltWidth * scale, 0, '#142237');
   ctx.save();
   ctx.beginPath();
-  ctx.rect(left, top, travel * scale, beltWidth * scale);
+  ctx.rect(left, top, extent * scale, beltWidth * scale);
   ctx.clip();
   for (const sample of samples) {
     if (!sample || !Number.isFinite(sample.displacementMm)) continue;
     // The fixed scan line intersects this position in the moving belt frame.
-    const center = scanX - sample.displacementMm;
+    const center = (sample.scanX ?? scanX) - sample.displacementMm;
     const x0 = Math.round(x(center - pitch / 2));
     const x1 = Math.round(x(center + pitch / 2));
     for (let row = 0; row < previewWidth; row++) {
@@ -201,8 +210,8 @@ export function drawAlignedPreview(canvas, samples, sensor, meta, outline) {
     for (const item of meta.objects) drawFootprint(ctx, item, 0, x, y, '#f1f6ff');
   }
   ctx.restore();
-  box(ctx, left, top, travel * scale, beltWidth * scale, 0, null, colors.border);
-  text(ctx, `${origin} mm`, left, y(beltWidth) + 17, colors.ink, 12);
+  box(ctx, left, top, extent * scale, beltWidth * scale, 0, null, colors.border);
+  text(ctx, `${Number(origin.toFixed(2))} mm`, left, y(beltWidth) + 17, colors.ink, 12);
   ctx.textAlign = 'center';
   text(ctx, '皮带方向 →', canvas.width / 2, y(beltWidth) + 17, colors.ink, 12);
   ctx.textAlign = 'right';
