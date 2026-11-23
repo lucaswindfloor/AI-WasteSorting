@@ -143,6 +143,10 @@ tr.selected { background: #213c51; }
 .inference-details > p { margin: 0 0 .55rem; }
 .inference-details td { white-space: nowrap; }
 .inference-image, .inference-details { min-width: 0; }
+.inference-physical canvas { width: min(100%, 396px); }
+@media (min-width: 901px) {
+  .inference-physical .calibration-grid { grid-template-columns: minmax(0, 396px) minmax(0, 1fr); }
+}
 .inference-image > p, .inference-deployment li, #inference-total { margin-top: .5rem; color: var(--muted); font-size: .81rem; }
 .inference-evidence { display: grid; gap: .55rem; margin-top: .6rem; }
 .inference-evidence:empty { display: none; }

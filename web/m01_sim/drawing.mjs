@@ -330,6 +330,11 @@ export function drawAlignedPreview(canvas, samples, sensor, meta, outline) {
 }
 
 export function drawInferenceWindow(canvas, rows, meta, window) {
+  const production = meta?.layout === 'production';
+  const canvasWidth = production ? 396 : 640;
+  const canvasHeight = production ? 570 : 350;
+  if (canvas.width !== canvasWidth) canvas.width = canvasWidth;
+  if (canvas.height !== canvasHeight) canvas.height = canvasHeight;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#0b1523';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -342,9 +347,16 @@ export function drawInferenceWindow(canvas, rows, meta, window) {
     ? meta.hsiScanX - row.hsiDisplacementMm
     : meta.scanX - row.displacementMm);
   const { pitch, beltWidth, previewWidth } = meta;
-  const min = Math.min(...coordinates) - 3 * pitch;
-  const max = Math.max(...coordinates) + 3 * pitch;
-  const left = 57, top = 28, width = canvas.width - left - 21, height = canvas.height - top - 50;
+  // The first row is on the positive-X side. Count each row as a strip of one pitch.
+  const max = production ? meta.scanX - (window.first - 0.5) * pitch : Math.max(...coordinates) + 3 * pitch;
+  const span = production ? meta.m03Rows * pitch : max - (Math.min(...coordinates) - 3 * pitch);
+  const frameSpan = meta.packetLines * pitch;
+  const min = max - span;
+  const top = production ? 42 : 28;
+  const scale = Math.min((canvas.width - 100) / span, (canvas.height - top - 53) / beltWidth);
+  const width = production ? span * scale : canvas.width - 78;
+  const height = production ? beltWidth * scale : canvas.height - top - 50;
+  const left = production ? (canvas.width - width) / 2 : 57;
   const x = (mm) => left + (mm - min) / (max - min) * width;
   const y = (mm) => top + mm / beltWidth * height;
   box(ctx, left, top, width, height, 0, '#17273b');
@@ -356,6 +368,7 @@ export function drawInferenceWindow(canvas, rows, meta, window) {
     const center = coordinates[i];
     const start = Math.round(x(center - pitch / 2));
     const end = Math.round(x(center + pitch / 2));
+    if (end <= start) continue;
     for (let col = 0; col < previewWidth; col++) {
       const upper = y(col / previewWidth * beltWidth);
       const lower = y((col + 1) / previewWidth * beltWidth);
@@ -363,8 +376,38 @@ export function drawInferenceWindow(canvas, rows, meta, window) {
       ctx.fillRect(start, Math.floor(upper), end - start, Math.ceil(lower) - Math.floor(upper));
     }
   }
+  if (production) {
+    ctx.setLineDash([4, 4]);
+    for (let mm = frameSpan; mm < span; mm += frameSpan) {
+      const at = x(min + mm);
+      line(ctx, at, top, at, top + height, '#7590a9');
+    }
+    ctx.setLineDash([]);
+  }
   drawCandidates(ctx, window.evidence, x, y, 0);
   ctx.restore();
+  if (production) {
+    box(ctx, left, top, width, height, 0, null, '#7590a9');
+    const frameCount = Math.ceil(span / frameSpan);
+    const bottom = y(beltWidth);
+    ctx.textAlign = 'center';
+    for (let frame = 0; frame <= frameCount; frame++) {
+      const offset = Math.min(frame * frameSpan, span);
+      const at = x(min + offset);
+      line(ctx, at, bottom, at, bottom + 6, colors.dim);
+      text(ctx, String(offset), at, bottom + 21, colors.ink, 14);
+      if (frame < frameCount) {
+        const midpoint = (offset + Math.min(offset + frameSpan, span)) / 2;
+        text(ctx, '第' + (frameCount - frame) + '段', x(min + midpoint), top - 11, colors.ink, 13);
+      }
+    }
+    text(ctx, '窗口内沿带 X（mm）', left + width / 2, bottom + 42, colors.ink, 14);
+    ctx.textAlign = 'right';
+    for (const mm of [0, beltWidth / 2, beltWidth]) text(ctx, String(mm), left - 9, y(mm) + 5, colors.ink, 14);
+    ctx.textAlign = 'left';
+    text(ctx, '跨带 Y（mm）', 10, 18, colors.ink, 14);
+    return;
+  }
   for (const mm of [0, beltWidth / 2, beltWidth]) text(ctx, String(mm), 11, y(mm) + 5, colors.ink, 15);
   text(ctx, 'Y mm', 10, 18, colors.ink, 15);
   text(ctx, min.toFixed(1), left, y(beltWidth) + 24, colors.ink, 15);

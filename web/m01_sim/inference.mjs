@@ -72,7 +72,7 @@ function displayQuality(row) {
   }
   for (const [label, key] of [['RGB', 'rgb'], ['HSI', 'hsi']]) {
     const count = quality?.[key];
-    if (count) entries.push(label + ' 有效样本 ' + count.valid + ' / ' + count.total);
+    if (count) entries.push(label + ' 张量有效值 ' + count.valid + ' / ' + count.total);
   }
   return entries.filter(Boolean).join(' · ');
 }
@@ -183,10 +183,14 @@ export class InferenceView {
     if (this.lastRow === row && this.lastMeta === meta) return;
     this.lastRow = row;
     this.lastMeta = meta;
+    const production = meta?.layout === 'production';
+    $('inference').classList.toggle('inference-physical', production);
     if (enabled) {
       const masks = meta.m03Mask === 'allow' ? '允许部分缺测' : '要求完整输入';
+      const extent = production ? '沿带 ' + meta.m03Rows * meta.pitch + ' mm × 跨带 ' + meta.beltWidth + ' mm · ' : '';
       $('inference-config').textContent = '模拟规则 · ' +
-        (meta.layout === 'production' ? '4 帧 · ' : '') + meta.m03Rows + ' 行窗口 / ' + meta.m03Step +
+        extent + (production ? meta.m03Rows / meta.packetLines + ' 段 × ' + meta.packetLines + ' 行 · ' : '') +
+        meta.m03Rows + ' 行窗口 / ' + meta.m03Step +
         ' 行步长 · ' + masks + ' · 处理预算 ' + meta.m03BudgetMs + ' ms';
     } else {
       $('inference-config').textContent = meta?.m03Mode === 'off' ? '本次关闭 M03 推理。' :
@@ -200,11 +204,16 @@ export class InferenceView {
     $('inference-version').textContent = row ? '#' + row.first + '–' + row.last + ' · 世代 ' +
       row.generation + ' · ' + describeModel(row.model) + ' · ' + (row.reference ?? '—') : '';
     $('inference-quality').textContent = displayQuality(row);
-    $('inference-caption').textContent = row ? '局部扫描预览 · ' +
-      (row.model.package === 'sim-hsi' ? 'HSI 选定波段' : 'RGB') + ' · 按沿带坐标放大窗口' : '';
+    $('inference-caption').textContent = !row ? '' : production ?
+      'RGB 等比例预览 · 先采到的段在右侧' + (row.state === 'retired' ? ' · 空白处尚未采齐' : '') :
+      '局部扫描预览 · ' + (row.model.package === 'sim-hsi' ? 'HSI 选定波段' : 'RGB') + ' · 按沿带坐标放大窗口';
     const segment = row ? [...rows.values()].filter((source) =>
       source.trigger >= row.first && source.trigger <= row.last) : [];
-    drawInferenceWindow($('inference-map'), segment, meta, row);
+    const canvas = $('inference-map');
+    canvas.setAttribute('aria-label', production ?
+      'M03 等比例窗口，沿带 ' + meta.m03Rows * meta.pitch + ' mm，跨带 ' + meta.beltWidth + ' mm' :
+      '按窗口回放扫描数据与 M03 候选框');
+    drawInferenceWindow(canvas, segment, meta, row);
     timeline(row);
     displayEvidence(row, this.onSource);
   }
