@@ -13,6 +13,11 @@ void contact_test() {
     check(fit.window && fit.window->instants == Window{145ms, 175ms} &&
           near(fit.window->current_pick.x, 80) && near(fit.window->current_pick.y, 406),
           "T042 contact window used target center or reapplied motion");
+    t.prediction.fresh_until = 75ms;
+    const auto future = contact_window(c, entry.candidate, t.prediction, t.forecast, region, 50ms);
+    check(future.window && future.window->instants == Window{145ms, 175ms} &&
+          contact_window(c, entry.candidate, t.prediction, t.forecast, region, 75ms).reason ==
+              Reason::PredictionInvalid, "encoder freshness should gate decisions without truncating future contact");
     auto point = entry.candidate;
     point.contact.center->x = 20;
     const auto offset = contact_window(c, point, t.prediction, t.forecast, region, 50ms);

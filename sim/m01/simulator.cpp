@@ -2,6 +2,7 @@
 #include "bcaf_export.h"
 #include "calibration.h"
 #include "inference.h"
+#include "pick_replay.h"
 
 #include "m01_acquisition/acquisition_service.h"
 #include "m09_archive/adapters/m01_capture_adapter.h"
@@ -309,7 +310,8 @@ SpectralSample spectral_sample(const m02::AlignedObservation& row, unsigned widt
 class Simulation {
 public:
     explicit Simulation(const Options& options)
-        : opts_(options), layout_(options.production ? production_layout : demo_layout),
+        : opts_(options), layout_(pet_pick(options.scenario) ? pet_pick_layout :
+                                options.production ? production_layout : demo_layout),
           interval_(static_cast<Tick::rep>(layout_.pitch * 1000000000 / opts_.speed_mm_s)),
           hsi_step_(opts_.production ? (opts_.speed_mm_s + 199) / 200 : 1),
           window_rows_(opts_.production ? production_window_rows : inference_rows),
@@ -348,6 +350,7 @@ private:
     unsigned projected_depth_{}, e05_zero_points_{}, e05_masked_points_{}, spectrum_valid_{};
     m09::ArchiveService archive_;
     m09::M01CaptureAdapter capture_;
+    std::optional<PickReplay> pick_;
     std::vector<Session> sessions_;
     std::vector<Trace> trace_;
     std::map<unsigned, Row> ledger_;
@@ -384,6 +387,9 @@ private:
     bool late(unsigned id) const;
     bool rgb_missing(unsigned id) const {
         return opts_.scenario == Scenario::RgbFrameLoss && id > 384 && id <= 512;
+    }
+    bool depth_masked(unsigned frame) const {
+        return pet_pick(opts_.scenario) ? opts_.scenario == Scenario::PetDepthLoss : frame % 7 == 0;
     }
     double scan_at(Source source) const {
         if (source == Source::E05) return layout_.depth_x;
@@ -465,7 +471,8 @@ void Simulation::run_session(const Session& session, const Session* previous) {
     }
     if (opts_.depth == DepthMode::Independent) {
         const auto belt_stops = duration + hsi_exposure_delay(opts_.scenario, interval_);
-        for (auto elapsed = Tick(12ms); elapsed <= belt_stops; elapsed += 12ms) {
+        const auto period = pet_pick(opts_.scenario) ? pet_depth_period : 12ms;
+        for (auto elapsed = Tick(period); elapsed <= belt_stops; elapsed += period) {
             const auto exposure = session.start + elapsed;
             events.push_back({exposure + 760us, exposure, Input::Depth, {}, ++depth_expected_});
         }
@@ -517,6 +524,10 @@ void Simulation::deliver(const Session& session, const Event& event) {
                 {"local", std::to_string(local)}, {"count", std::to_string(count)},
                 {"distance", std::to_string((session.base + local) * layout_.pitch)},
                 {"generation", std::to_string(conf.generation)}, {"epoch", std::to_string(conf.encoder_epoch)}}));
+            if (pick_) {
+                pick_->encoder(event.at, count);
+                pick_->advance(event.at);
+            }
         } else {
             const m01::SyncInput sync{conf.generation, {trigger_key(session, local), count, 1,
                 m01::SourceTime{"sim-encoder-clock", event.exposure.count()}}, event.at};
@@ -540,7 +551,7 @@ void Simulation::deliver(const Session& session, const Event& event) {
     for (auto local : lane) {
         const auto acquired = depth || event.old ? event.exposure : exposure_at(session, source, local);
         auto signal = scan(source, opts_.profile, layout_, displacement(session, acquired),
-                           depth && event.frame % 7 == 0, scan_at(source));
+                           depth && depth_masked(event.frame), scan_at(source));
         m01::ObservationHeader h;
         h.id = depth ? m01::ObservationId{source, device.session, 8000 + event.frame, 0}
                      : hsi_independent ? m01::ObservationId{source, device.session, 399 + event.frame, 0}
@@ -619,7 +630,7 @@ void Simulation::accept(Tick now, m01::Output output) {
                 const auto exposure = d->received - 760us;
                 const auto steps = static_cast<double>((exposure - session.start).count()) / interval_.count();
                 const auto linked = d->header.trigger ? session.base + d->header.trigger->id : 0;
-                const auto expected_mask = (d->header.id.frame - 8000) % 7 == 0;
+                const auto expected_mask = depth_masked(d->header.id.frame - 8000);
                 check(d->header.source_time == m01::SourceTime{"E05-SIM-clock", (exposure + 427us).count()} &&
                       (expected_mask == d->header.valid_mask.has_value()) &&
                       ((opts_.depth == DepthMode::Encoder && linked && (linked - session.base) % 8 == 0) ||
@@ -735,6 +746,7 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
             {"trigger", std::to_string(trigger)}, {"geometry", quote(versions.geometry)}, {"valid", std::to_string(valid)},
             {"zeros", std::to_string(zeros)}, {"masked", std::to_string(masked)}, {"observation", describe_alignment(&row)}}));
     }
+    if (pick_) pick_->surfaces(now, result);
     if (!routes_.empty() && (!result.triggers.empty() || !result.acquisition_diagnostics.empty())) {
         auto deadline = now + budget_;
         for (const auto& trigger : result.triggers) {
@@ -770,6 +782,10 @@ void Simulation::activate_inference(const Session& session, const m02::Snapshot&
         auto manifest = inference_manifest(route, session.config, snapshot, layout_, std::to_string(generation),
                                            opts_.allow_masks, window_rows_, window_step_, budget_);
         const auto identity = manifest.identity;
+        if (pet_pick(opts_.scenario)) {
+            pick_.emplace(opts_.scenario, layout_, opts_.profile.depth_width, archive_, snapshot, identity,
+                          [this](Tick at, std::string_view kind, std::string data) { log(at, kind, std::move(data)); });
+        }
         activation.models.push_back(identity.key);
         m03_.install(std::move(manifest), inference_artifact(identity.key.version), backend);
         log_deployment(session.start, generation, "warmed", {identity});
@@ -846,6 +862,7 @@ void Simulation::record_inference(Tick now, m03::Report report) {
               inference_windows_.emplace(generation, id.model, id.first, id.last).second,
               "M03 returned a duplicate or out-of-generation window");
         const bool online = result.state == m03::State::Completed || result.state == m03::State::NoDetection;
+        if (pick_ && online) pick_->window(now, result);
         check((result.state == m03::State::Completed) == !result.evidence.empty() &&
               (!online || result.finished < result.deadline) &&
               result.state != m03::State::Failed && result.state != m03::State::Rejected, "unexpected M03 result state");
@@ -977,7 +994,9 @@ Report Simulation::verify() {
         return trigger.second == m02::CoverageStatus::Available;
     });
     check(out.calibrated == layout_.lines, "unexpected number of M02 trigger results");
-    check(projected_depth_ == depth_expected_ && e05_zero_points_ && e05_masked_points_,
+    const bool expects_depth_mask = !pet_pick(opts_.scenario) || opts_.scenario == Scenario::PetDepthLoss;
+    check(projected_depth_ == depth_expected_ && e05_zero_points_ &&
+          static_cast<bool>(e05_masked_points_) == expects_depth_mask,
           "M02 E05 projections, valid zeros or masks were lost");
     out.late = diagnostics_[m01::Issue::Late];
     check(out.late == static_cast<unsigned>(late(late_line)), "late diagnostic count mismatched");
@@ -1003,7 +1022,7 @@ Report Simulation::verify() {
 
     const auto depth_zeros = std::ranges::any_of(depth_, [](const auto& sample) { return sample.valid_zeros > 0; });
     const auto depth_mask = std::ranges::any_of(depth_, [](const auto& sample) { return sample.masked > 0; });
-    check(depth_zeros && depth_mask, "E05 zero or invalid mask was lost");
+    check(depth_zeros && depth_mask == expects_depth_mask, "E05 zero or invalid mask was lost");
 
     // Compare archive bytes and M01 row identities with independently generated
     // sensor expectations so an equal count can't hide a wrong association.
@@ -1212,6 +1231,10 @@ Report Simulation::execute() {
         advance_inference(inference_now_ + 1ms);
     }
     archive_until(Tick::max());
+    if (pick_) {
+        auto problem = pick_->verify();
+        if (!problem.empty()) check(false, std::move(problem));
+    }
     const auto sealed = archive_.seal(run_id, false, "M01 simulation inputs and tail processed");
     check(m09::accepted(sealed.status), "M09 could not seal run");
     if (sealed.value) {
@@ -1241,15 +1264,29 @@ std::string_view name(Scenario scenario) {
     case Scenario::InferenceOverload: return "inference-overload";
     case Scenario::ModelSwitch: return "model-switch";
     case Scenario::RgbFrameLoss: return "rgb-frame-loss";
+    case Scenario::PetPick: return "pet-pick";
+    case Scenario::PetDepthLoss: return "pet-depth-loss";
+    case Scenario::PetEncoderLoss: return "pet-encoder-loss";
+    case Scenario::PetReceiptLoss: return "pet-receipt-loss";
     }
     return {};
+}
+
+bool pet_pick(Scenario scenario) {
+    return scenario == Scenario::PetPick || scenario == Scenario::PetDepthLoss ||
+           scenario == Scenario::PetEncoderLoss || scenario == Scenario::PetReceiptLoss;
 }
 
 Report run(const Options& options) {
     if (options.export_bcaf && (!options.production || options.inference != InferenceMode::Rgb || options.allow_masks)) {
         throw std::invalid_argument("--export-bcaf requires production, --m03 rgb and --m03-mask strict");
     }
-    if (options.production && (options.speed_mm_s < 1000 || options.speed_mm_s > 3000 ||
+    if (pet_pick(options.scenario)) {
+        if (!options.production || options.speed_mm_s != 1000 || options.inference != InferenceMode::Rgb ||
+            options.depth != DepthMode::Independent || options.allow_masks || options.export_bcaf) {
+            throw std::invalid_argument("single-bottle picking uses production, 1000 mm/s, independent depth and RGB/strict");
+        }
+    } else if (options.production && (options.speed_mm_s < 1000 || options.speed_mm_s > 3000 ||
         (options.scenario != Scenario::Normal && options.scenario != Scenario::RgbFrameLoss) ||
         (options.inference != InferenceMode::Rgb && options.inference != InferenceMode::Off))) {
         throw std::invalid_argument("production uses normal or rgb-frame-loss, RGB/off, and 1000–3000 mm/s");

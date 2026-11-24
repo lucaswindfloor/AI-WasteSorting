@@ -70,6 +70,10 @@ unsigned width_for(m01::Source source, const Profile& profile) {
 
 }  // namespace
 
+double surface_height(const Layout& layout, double belt_x, double belt_y, double displacement) {
+    return sample(layout, belt_x, displacement, belt_y).height;
+}
+
 std::vector<std::string> wavelengths(unsigned bands) {
     std::vector<std::string> values;
     for (unsigned band = 0; band < bands; ++band) {

@@ -209,7 +209,7 @@ Issue ExecutionService::live_task(const AttemptRecord& attempt, Tick now) {
             current->prediction.version != task.candidate.target.version ||
             current->prediction.generation != task.candidate.target.generation ||
             current->prediction.origin != task.candidate.target.reference ||
-            current->prediction.current.time > now ||
+            current->prediction.current.time > now || now >= current->prediction.fresh_until ||
             current->prediction.current.encoder_epoch != task.reference.encoder_epoch ||
             current->forecast.generation != task.candidate.target.generation ||
             current->forecast.reference != current->prediction.current ||

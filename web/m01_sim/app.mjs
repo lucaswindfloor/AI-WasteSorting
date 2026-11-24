@@ -10,7 +10,8 @@ const names = {
   DuplicateConflict: '重复数据有冲突', InvalidPacket: '封包格式无效', UnknownAssociation: '触发归属待核',
 };
 const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02-depth',
-  'm03-model', 'm03-window', 'hsi-independent', 'm02-hsi', 'diagnostic', 'archive', 'reconnect', 'seal']);
+  'm03-model', 'm03-window', 'hsi-independent', 'm02-hsi', 'diagnostic', 'archive', 'reconnect', 'seal',
+  'pick-window', 'pick-eligibility', 'pick-task', 'pick-action']);
 const calibration = new CalibrationView();
 const inference = new InferenceView(inspectSource);
 const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -37,6 +38,11 @@ let latestDiagnostic = null;
 let health = {};
 let firstGap = null;
 let firstCandidate = null;
+let picking = {};
+const pickStages = { receipt: '控制器已收件', admitted: '运动已准入', contact: '已接触',
+  holding: '末端已持物', 'placement-ended': '投放动作结束', released: '已释放到模拟测试箱',
+  finished: '机器人动作结束', 'robot-ready': '机器人已回位', 'resources-released': '资源已归还',
+  pending: '发令效果待核，资源保留' };
 
 function status(text, kind = '') {
   $('run-status').textContent = text;
@@ -67,6 +73,7 @@ function reset() {
   rowSignature = '';
   lastColumns = -1;
   lastDepths = -1;
+  picking = {};
 }
 
 function ingest(event) {
@@ -94,7 +101,34 @@ function ingest(event) {
     health = data;
   } else if (event.type === 'archive') {
     for (const trigger of data.triggers) archiveRows.set(trigger, data.manifest);
+  } else if (event.type === 'pick-position') {
+    picking.position = data;
+    if (data.valid) (picking.trail ??= []).push(data.point);
+  } else if (event.type === 'pick-task') {
+    picking.task = data;
+  } else if (event.type === 'pick-eligibility') {
+    picking.eligibility = data.state;
+  } else if (event.type === 'pick-action') {
+    if (data.state === 'holding') picking.removed = true;
+    if (data.state in pickStages) picking.action = data.state;
   }
+}
+
+function paintPick(meta) {
+  if (!meta?.scenario.startsWith('pet-')) return;
+  const p = picking.position;
+  const t = picking.task;
+  const coordinates = (point, count) =>
+    point.slice(0, count).map((value) => value.toFixed(1)).join(', ') + ' mm';
+  $('pick-center').textContent = p?.valid ? 'M04 目标 #' + p.id + ' · 中心 (' +
+    coordinates(p.point, 2) + ') · 参考计数 ' + p.referenceCount + ' · 当前计数 ' + p.count :
+    picking.removed ? 'M04 目标已离开皮带' : p ? 'M04 位置失效' : 'M04 等待完整轮廓';
+  $('pick-contact').textContent = t ? 'M05 抓点 (' + coordinates(t.point, 3) + ') · 参考计数 ' +
+    t.referenceCount + ' · E05 源点 ' + t.sourceSamples + ' 个 · M06 接触窗 ' +
+    t.openMs.toFixed(1) + '–' + t.closeMs.toFixed(1) + ' ms' :
+    picking.eligibility === 'depth-missing' ? 'M05 抓区深度缺测' : 'M05 等待合格抓点';
+  $('pick-progress').textContent = picking.action ? 'M07 ' + pickStages[picking.action] :
+    p && !p.valid && !picking.removed ? '位置依据失效，停止发令' : t ? 'M07 等待发令' : '';
 }
 
 function paintTable() {
@@ -169,7 +203,8 @@ function paint() {
   const aligned = $('preview-mode').value === 'aligned';
   const outline = $('preview-outline').checked;
   drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic,
-    $('inference-overlay').checked ? inference.current()?.evidence : undefined, $('plant-view').value);
+    $('inference-overlay').checked ? inference.current()?.evidence : undefined, $('plant-view').value, picking);
+  paintPick(meta);
   $('current-pulse').textContent = '触发 ' + (latestTrigger?.trigger ? '#' + latestTrigger.trigger : '—');
   $('time').textContent = cursor.toFixed(1) + ' ms';
   $('seek').value = cursor;
@@ -285,6 +320,9 @@ function install(data) {
   firstCandidate = report.events.find((event) => event.type === 'm03-window' && event.data.state === 'completed');
   $('inference-first').disabled = !firstCandidate;
   const production = meta.layout === 'production';
+  $('pick-replay').hidden = !meta.scenario.startsWith('pet-');
+  $('pick-jump').disabled = !report.events.some((event) => event.type === 'pick-action' && event.data.state === 'contact');
+  $('material-al-card').hidden = !meta.objects.some((item) => item.material === 'AL');
   $('ledger-description').textContent = production ? 'RGB 有效行与编码器一一核对' : '使用 M01 的实际配对结果';
   $('plant-tools').hidden = !production;
   $('plant-materials').hidden = !production;
@@ -339,6 +377,7 @@ $('controls').addEventListener('submit', async (event) => {
   opts.speed = Number(opts.speed);
   opts.packetLines = Number(opts.packetLines);
   if (opts.inference === 'bcaf') opts.masks = 'strict';
+  if (opts.scenario.startsWith('pet-')) opts.masks = 'strict';
   try {
     const response = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts),
@@ -356,6 +395,13 @@ $('controls').addEventListener('submit', async (event) => {
   }
 });
 $('play').addEventListener('click', () => playing ? pause() : play());
+$('pick-jump').addEventListener('click', () => {
+  const contact = report?.events.find((event) => event.type === 'pick-action' && event.data.state === 'contact');
+  if (contact) {
+    pause();
+    seek(contact.t);
+  }
+});
 $('step').addEventListener('click', () => {
   pause();
   const next = report?.events.slice(index).find((event) => significant.has(event.type));
@@ -421,19 +467,22 @@ function changeLayout() {
     const current = select.value;
     for (const option of select.options) {
       option.hidden = Boolean(values && !values.includes(option.value)) ||
-        (!production && ['rgb-frame-loss', 'bcaf'].includes(option.value));
+        (!production && (['rgb-frame-loss', 'bcaf'].includes(option.value) || option.value.startsWith('pet-')));
       option.disabled = option.hidden;
     }
     if (select.selectedOptions[0]?.disabled || !current) {
       select.value = name === 'scenario' ? 'normal' : name === 'speed' ? '1000' : 'rgb';
     }
   };
-  filter('scenario', production ? ['normal', 'rgb-frame-loss'] : null);
-  filter('speed', production ? ['1000', '2000', '3000'] : null);
-  filter('inference', production ? ['rgb', 'off', 'bcaf'] : null);
+  filter('scenario', production ? ['normal', 'rgb-frame-loss', 'pet-pick', 'pet-depth-loss', 'pet-encoder-loss', 'pet-receipt-loss'] : null);
+  const pet = production && form.elements.scenario.value.startsWith('pet-');
+  filter('speed', production ? pet ? ['1000'] : ['1000', '2000', '3000'] : null);
+  filter('inference', production ? pet ? ['rgb'] : ['rgb', 'off', 'bcaf'] : null);
+  if (pet) form.elements.depth.value = 'independent';
+  form.elements.depth.options[1].disabled = pet;
   const bcaf = form.elements.inference.value === 'bcaf';
-  if (bcaf) form.elements.masks.value = 'strict';
-  form.elements.masks.disabled = bcaf;
+  if (bcaf || pet) form.elements.masks.value = 'strict';
+  form.elements.masks.disabled = bcaf || pet;
   for (const name of ['profile', 'packetLines']) {
     form.elements[name].disabled = production;
     form.elements[name].closest('label').hidden = production;
@@ -441,6 +490,7 @@ function changeLayout() {
 }
 
 $('controls').elements.layout.addEventListener('change', changeLayout);
+$('controls').elements.scenario.addEventListener('change', changeLayout);
 $('controls').elements.inference.addEventListener('change', changeLayout);
 $('plant-view').addEventListener('change', () => {
   $('belt').height = $('plant-view').value === 'infeed' ? 555 : 380;

@@ -77,8 +77,7 @@ Prediction predict_position(const TrackingConfig& c, const Target& target,
         result.current = encoder->reference;
         result.reason = encoder_issue(c, *encoder, now);
         if (result.reason == Reason::None) {
-            result.valid_until = std::min(target.valid_until,
-                                          reference_expiry(encoder->reference, c.max_encoder_age));
+            result.fresh_until = reference_expiry(encoder->reference, c.max_encoder_age);
             const auto movement = displacement(c, result.origin, result.current);
             if (result.current.time < result.origin.time) {
                 result.reason = Reason::EncoderUnavailable;

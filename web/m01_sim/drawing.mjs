@@ -109,9 +109,9 @@ function drawCandidates(ctx, evidence, x, y, offset, prefix = '') {
   }
 }
 
-export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence = [], view = 'line') {
+export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence = [], view = 'line', picking = {}) {
   if (meta?.layout === 'production') {
-    drawProductionBelt(canvas, meta, now, pulse, evidence, view);
+    drawProductionBelt(canvas, meta, now, pulse, evidence, view, picking);
     return;
   }
   const ctx = canvas.getContext('2d');
@@ -169,7 +169,7 @@ export function drawBelt(canvas, meta, now, pulse, packet, diagnostic, evidence 
   }
 }
 
-function drawProductionBelt(canvas, meta, now, pulse, evidence, view) {
+function drawProductionBelt(canvas, meta, now, pulse, evidence, view, picking) {
   const ctx = canvas.getContext('2d');
   const span = view === 'infeed' ? 1850 : meta.beltLength;
   const scale = Math.min((canvas.width - 64) / span, (canvas.height - 145) / meta.beltWidth);
@@ -194,6 +194,7 @@ function drawProductionBelt(canvas, meta, now, pulse, evidence, view) {
     text(ctx, '抓取区', x(meta.pickBegin) + 8, y0 + 23, '#a4e7b9', 14);
   }
   for (const item of meta.objects) {
+    if (picking.removed) continue;
     const center = item.x + shift;
     const left = x(center - item.length / 2);
     const top = y(item.y - item.width / 2);
@@ -202,7 +203,27 @@ function drawProductionBelt(canvas, meta, now, pulse, evidence, view) {
     }
     text(ctx, item.id, left, top - 5, '#e3edf3', 12);
   }
-  drawCandidates(ctx, evidence, x, y, shift, '');
+  if (!picking.removed) drawCandidates(ctx, evidence, x, y, shift, '');
+  if (picking.trail?.length > 1) {
+    ctx.beginPath();
+    for (const [px, py] of picking.trail) ctx.lineTo(x(px), y(py));
+    ctx.strokeStyle = '#77f5ff75';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  if (picking.position?.valid) {
+    const [px, py] = picking.position.point;
+    const at = x(px), across = y(py);
+    line(ctx, at - 6, across, at + 6, across, '#77f5ff', 2);
+    line(ctx, at, across - 6, at, across + 6, '#77f5ff', 2);
+    text(ctx, '中心 #' + picking.position.id, at + 9, across - 9, '#77f5ff', 13);
+    if (picking.task) {
+      const [gx, gy] = picking.task.point;
+      const pickX = x(gx + (picking.position.count - picking.task.referenceCount) * picking.position.mmPerCount);
+      box(ctx, pickX - 3, y(gy) - 3, 6, 6, 0, '#ffd97e');
+      text(ctx, '抓点', pickX + 7, y(gy) + 15, '#ffd97e', 13);
+    }
+  }
   const sharedScanLine = meta.scanX === meta.hsiScanX && meta.scanX === meta.depthScanX;
   const stations = sharedScanLine ? [['RGB / HSI / 深度', meta.scanX, colors.cyan]] : [
     ['RGB', meta.scanX, colors.cyan],

@@ -185,6 +185,29 @@ M01_SIM_BCAF_REPO=../BCAF_2026 M01_SIM_BCAF_CHECKPOINT="$checkpoint" \
 
 在生产布局中选择「BCAF 512 · 离线分割」，然后运行仿真。点「跳到首个候选」或切换「回放窗口」，在 M03 面板查看该窗叠加图与前向耗时。默认设备是 CPU，可以通过 `M01_SIM_BCAF_DEVICE=cuda:0` 切换。网页默认直接使用仿真反射率，可用 `M01_SIM_BCAF_HSI_STATS` 指向与输入单位一致的训练统计文件。
 
+## 7. 单 PET 瓶抓取闭环
+
+在 Linux 或 WSL2 的仓库根目录运行。
+
+```sh
+make -j4 m01-sim
+build/m01_sim --layout production --scenario pet-pick --output build/pet-pick
+make m01-pick-test
+```
+
+也可以重启 `node web/m01_sim/server.mjs`，打开本机 `http://127.0.0.1:8081`，选择「单 PET 瓶 · 跟踪与抓取」。回放会画出青色的轮廓面积中心和黄色的吸盘接触点，并显示参考计数、E05 依据、接触窗与 M07 状态。点「跳到接触」可以直接查看抓取时刻。下载的事件 JSON 保留 `pick-window`、`pick-position`、`pick-eligibility`、`pick-task` 和 `pick-action` 等事件。
+
+此组场景固定使用 800 mm 带宽、1 m/s 带速、每 128 行滑动一次的 512 行 RGB 窗口和 4 ms 独立模拟 E05 采样。M04 根据实收 RGB 轮廓建立单件目标，边缘截断窗仅留诊断。M05 的单瓶吸盘配方使用模拟 E05 网格与独立检查过的模拟接触面，通过后走未知料测试箱。M06 使用接触点、速度范围和计数参考算时间，M07 经模拟控制器和 M09 命令日志走完收件、持物、释放与回位。真实设备的采样覆盖、吸盘与控制协议需要单独测量。重复运行时请换一个输出目录。
+
+| 场景 | 验收结果 |
+| --- | --- |
+| `pet-pick` | 同一目标跨三个完整窗口，中心随编码器向前；恰好一次有效发送，在接触窗内抓到，投放后归还资源。 |
+| `pet-depth-loss` | 中心仍可跟踪，瓶身所在的深度采样列缺测，M05 阻止抓取。 |
+| `pet-encoder-loss` | 已观测目标的计数更新中断，位置失效，M07 在发令前拦截。 |
+| `pet-receipt-loss` | 一次发送的效果无法确认，M07 查询同一请求并保留资源。 |
+
+上述场景沿用同一组模拟观测和正式模块入口。由 `make m01-pick-test` 核对同件编号、轮廓边界、计数位移、深度拒抓、接触时刻和任务收口。M06 与 M07 在各自决策时检查计数新鲜度，未来接触窗口则由目标、抓持证据和运动预测的有效范围约束。
+
 ## 代码位置
 
 - `sim/m01/scene.*` 从同一场景计算 RGB 行、合成光谱和深度。
@@ -192,6 +215,7 @@ M01_SIM_BCAF_REPO=../BCAF_2026 M01_SIM_BCAF_CHECKPOINT="$checkpoint" \
 - `sim/m01/inference.*` 构建模型清单、校验模拟制品，并从张量生成物料候选。
 - `sim/m01/bcaf_export.*` 导出经 M02 校验的 RGB 行、HSI 位置和校正光谱。
 - `sim/m01/bcaf_infer.py` 配准、组图、运行 BCAF 并保存分割结果。
+- `sim/m01/pick_replay.*` 衔接 M04–M07 单瓶闭环，生成接触面证据、模拟设备反馈和回放事件。
 - `sim/m01/simulator.*` 推进时间，衔接 M01、M02、M03 和 M09，核验并写报告。
 - `sim/m01/main.cpp` 提供命令行参数和运行结果。
 - `web/m01_sim/` 使用本机服务调用同一程序，播放数据并定位触发。

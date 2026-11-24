@@ -48,8 +48,11 @@ inline constexpr Layout demo_layout{belt_width, 0, scan_x, scan_x, scan_x, pitch
 inline constexpr double production_scan_x = 750;
 inline constexpr Layout production_layout{800, 5500, production_scan_x, production_scan_x, production_scan_x,
                                            1, 2560, 2400, 2900, production_materials};
+inline constexpr Layout pet_pick_layout{800, 5500, production_scan_x, production_scan_x, production_scan_x,
+                                         1, 3200, 2400, 2900, std::span(production_materials).first<1>()};
 
 std::span<const ProfileStation> footprint(const Material& item);
+double surface_height(const Layout& layout, double belt_x, double belt_y, double displacement);
 
 struct Profile {
     unsigned rgb_width{96}, hsi_width{80}, hsi_bands{16}, depth_width{64}, packet_lines{2};

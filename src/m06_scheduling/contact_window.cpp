@@ -40,7 +40,7 @@ ContactComputation contact_window(const SchedulingConfig& c, const m05::Candidat
         !valid_ref(p.origin) || !valid_ref(p.current) ||
         p.origin.encoder_epoch != p.current.encoder_epoch || p.current.time < p.origin.time ||
         p.current.time > now || now - p.current.time >= c.max_prediction_age ||
-        now >= p.valid_until || !std::isfinite(p.applied_mm) ||
+        now >= p.valid_until || now >= p.fresh_until || !std::isfinite(p.applied_mm) ||
         !std::isfinite(p.error_mm) || p.error_mm < 0 || p.error_mm > c.max_tracking_error_mm) {
         return {{}, Reason::PredictionInvalid};
     }

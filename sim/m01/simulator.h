@@ -8,7 +8,7 @@ namespace waste::m01sim {
 enum class Scenario {
     Normal, Missing, Late, Mixed, SlowArchive, Reconnect, TransportDelay, ExposureDelay,
     Compensated, ExposureLimit, ClockMissing, CountInterpolation, InvalidWhite, InferenceOverload, ModelSwitch,
-    RgbFrameLoss
+    RgbFrameLoss, PetPick, PetDepthLoss, PetEncoderLoss, PetReceiptLoss
 };
 enum class DepthMode { Independent, Encoder };
 enum class InferenceMode { Off, Rgb, Hsi, Split, Joint };
@@ -33,6 +33,7 @@ struct Report {
 };
 
 std::string_view name(Scenario scenario);
+bool pet_pick(Scenario scenario);
 std::string_view name(InferenceMode mode);
 Report run(const Options& options);
 

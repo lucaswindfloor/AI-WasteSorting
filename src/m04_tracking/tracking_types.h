@@ -125,6 +125,9 @@ struct Prediction {
     Point position;
     double applied_mm{}, error_mm{};
     Tick valid_until{};
+    // How long the current encoder sample may be used to make a decision.
+    // Future contact is bounded separately by target validity and the motion forecast.
+    Tick fresh_until{Tick::max()};
 };
 
 struct AssociationEvent {

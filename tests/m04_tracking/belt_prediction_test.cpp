@@ -16,6 +16,8 @@ void prediction_test() {
           near(prediction.position.x, 230) && prediction.version == 3 &&
           prediction.origin.count == 33815 && prediction.current.count == 37815 && prediction.error_mm > 2,
           "T042 prediction reapplied the M02 shift or lost version/uncertainty");
+    check(prediction.valid_until == target.valid_until && prediction.fresh_until == 260ms - 1ns,
+          "target validity and current encoder freshness were conflated");
     check(predict_position(c, target, &motion, 260ms).reason == Reason::EncoderStale,
           "stale count used for online prediction");
     motion.reference.encoder_epoch = 8;

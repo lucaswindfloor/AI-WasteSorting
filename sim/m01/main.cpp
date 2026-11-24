@@ -23,7 +23,8 @@ Scenario scenario(std::string_view value) {
                         Scenario::SlowArchive, Scenario::Reconnect, Scenario::TransportDelay,
                         Scenario::ExposureDelay, Scenario::Compensated, Scenario::ExposureLimit,
                         Scenario::ClockMissing, Scenario::CountInterpolation, Scenario::InvalidWhite,
-                        Scenario::InferenceOverload, Scenario::ModelSwitch, Scenario::RgbFrameLoss}) {
+                        Scenario::InferenceOverload, Scenario::ModelSwitch, Scenario::RgbFrameLoss,
+                        Scenario::PetPick, Scenario::PetDepthLoss, Scenario::PetEncoderLoss, Scenario::PetReceiptLoss}) {
         if (name(option) == value) return option;
     }
     throw std::invalid_argument("unknown scenario");
@@ -90,6 +91,7 @@ void help() {
                  "        transport-delay|exposure-delay|compensated|exposure-limit\n"
                  "        clock-missing|count-interpolation|invalid-white|inference-overload|model-switch\n"
                  "        production uses normal|rgb-frame-loss, RGB/off and 1000..3000 mm/s\n"
+                 "        pet-pick|pet-depth-loss|pet-encoder-loss|pet-receipt-loss use production, RGB/strict at 1000 mm/s\n"
                  "        [--speed-mm-s 500..3000] [--depth independent|encoder]\n"
                  "        [--m03 off|rgb|hsi|split|joint] [--m03-mask strict|allow]\n"
                  "        [--export-bcaf] export calibrated production RGB+HSI for offline inference\n"

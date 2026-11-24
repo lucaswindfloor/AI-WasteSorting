@@ -19,6 +19,10 @@
       <label>场景<select name="scenario">
         <option value="mixed">高光谱漏行与晚到</option><option value="normal" selected>正常采集</option>
         <option value="rgb-frame-loss">RGB 整帧丢失</option>
+        <option value="pet-pick">单 PET 瓶 · 跟踪与抓取</option>
+        <option value="pet-depth-loss">单 PET 瓶 · 抓区深度缺测</option>
+        <option value="pet-encoder-loss">单 PET 瓶 · 跟踪计数中断</option>
+        <option value="pet-receipt-loss">单 PET 瓶 · 发令效果待核</option>
         <option value="missing">高光谱漏行</option><option value="late">高光谱晚到</option>
         <option value="slow-archive">归档变慢</option><option value="reconnect">设备重连</option>
         <optgroup label="M02 时空与标定">
@@ -57,6 +61,13 @@
           <span id="plant-stations"></span>
         </div>
         <canvas id="belt" width="1000" height="380" aria-label="传送带顶视图，显示物料、编码器位置和扫描线" role="img"></canvas>
+        <div id="pick-replay" class="pick-replay" hidden>
+          <div class="transport"><h3>单瓶跟踪与抓取</h3>
+            <button type="button" id="pick-jump" disabled>跳到接触</button></div>
+          <p id="pick-center"></p>
+          <p id="pick-contact"></p>
+          <p id="pick-progress" role="status"></p>
+        </div>
         <div class="transport">
           <button type="button" id="play" disabled>播放</button><button type="button" id="step" disabled>下一事件</button>
           <input id="seek" aria-label="回放时间" type="range" min="0" max="1" step="any" value="0" disabled>
@@ -88,7 +99,7 @@
         <div><h2>PET 饮料瓶</h2><p id="material-pet-size"></p></div>
         <canvas id="material-pet" width="380" height="128" role="img" aria-label="透明 PET 饮料瓶俯视图"></canvas>
       </article>
-      <article class="panel">
+      <article class="panel" id="material-al-card">
         <div><h2>铝饮料罐</h2><p id="material-al-size"></p></div>
         <canvas id="material-al" width="380" height="128" role="img" aria-label="铝饮料罐俯视图"></canvas>
       </article>

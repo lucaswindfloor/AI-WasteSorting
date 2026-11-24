@@ -81,8 +81,10 @@ async function simulate(req, res) {
     inference = layout === 'production' ? 'rgb' : 'joint', masks = 'strict' } = options;
   const production = layout === 'production';
   const bcaf = inference === 'bcaf';
+  const pet = ['pet-pick', 'pet-depth-loss', 'pet-encoder-loss', 'pet-receipt-loss'].includes(scenario);
   const validLayout = production ?
-    ['normal', 'rgb-frame-loss'].includes(scenario) && ['off', 'rgb', 'bcaf'].includes(inference) :
+    (pet ? speed === 1000 && depth === 'independent' && inference === 'rgb' && masks === 'strict' :
+      ['normal', 'rgb-frame-loss'].includes(scenario) && ['off', 'rgb', 'bcaf'].includes(inference)) :
     layout === 'demo' && scenarios.has(scenario) && devices.has(profile) &&
       Number.isInteger(packetLines) && packetLines >= 1 && packetLines <= 8 &&
       ['off', 'rgb', 'hsi', 'split', 'joint'].includes(inference);
