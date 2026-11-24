@@ -16,7 +16,10 @@ const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02
 const calibration = new CalibrationView();
 const inference = new InferenceView(inspectSource);
 const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const resumeKey = 'm01-sim.last-run';
 let report = null;
+let lastRun = null;
+let productionPreview = null;
 let selected = 0;
 let cursor = 0;
 let index = 0;
@@ -54,6 +57,22 @@ function status(text, kind = '') {
 function showMessage(text) {
   $('message').hidden = !text;
   $('message').textContent = text;
+}
+
+function readLastRun() {
+  try {
+    return JSON.parse(localStorage.getItem(resumeKey));
+  } catch {
+    return null;
+  }
+}
+
+function saveLastRun() {
+  try {
+    localStorage.setItem(resumeKey, JSON.stringify({ ...lastRun, time: cursor }));
+  } catch {
+    // A blocked storage API only disables resume.
+  }
 }
 
 function reset() {
@@ -204,8 +223,12 @@ function paint() {
   const meta = report?.meta;
   const aligned = $('preview-mode').value === 'aligned';
   const outline = $('preview-outline').checked;
-  drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic,
-    $('inference-overlay').checked ? inference.current()?.evidence : undefined, $('plant-view').value, picking);
+  const production = $('controls').elements.layout.value === 'production';
+  const belt = meta ?? (production ? productionPreview : null);
+  if (belt || !production) {
+    drawBelt($('belt'), belt, cursor, latestTrigger, latestPacket, latestDiagnostic,
+      $('inference-overlay').checked ? inference.current()?.evidence : undefined, $('plant-view').value, picking);
+  }
   paintPick(meta);
   if (pickMotion) {
     const travel = distanceAt(meta, cursor);
@@ -317,7 +340,44 @@ function inspectSource(trigger) {
   $('calibration').scrollIntoView();
 }
 
-function install(data) {
+function paintStation(meta) {
+  const production = meta?.layout === 'production';
+  $('plant-tools').hidden = !production;
+  if (!production) return;
+  const shared = meta.scanX === meta.hsiScanX && meta.scanX === meta.depthScanX;
+  const stations = shared ? 'RGB / HSI / 深度共用截面 ' + meta.scanX + ' mm' :
+    'RGB ' + meta.scanX + ' mm · HSI ' + meta.hsiScanX + ' mm · 深度 ' + meta.depthScanX + ' mm';
+  $('plant-stations').textContent = stations + ' · 抓取区 ' + meta.pickBegin + '–' + meta.pickEnd + ' mm';
+}
+
+function paintStationPreview() {
+  if (report) return;
+  const production = $('controls').elements.layout.value === 'production';
+  const preview = production ? productionPreview : null;
+  paintStation(preview);
+  $('plant-view').value = 'line';
+  $('belt').height = 380;
+  $('geometry').textContent = preview
+    ? preview.beltLength + ' × ' + preview.beltWidth + ' mm · 台架预览'
+    : production ? '运行后显示生产台架尺寸。' : '演示台架预览';
+  paint();
+}
+
+async function loadProductionPreview() {
+  try {
+    const response = await fetch('/api/production-layout', { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data.layout === 'production') {
+      productionPreview = { ...data, objects: [] };
+      paintStationPreview();
+    }
+  } catch {
+    // A missing preview does not prevent loading a saved run.
+  }
+}
+
+function install(data, { at = 0, autoplay = !motionReduced } = {}) {
   report = data.report;
   const { meta, summary } = report;
   selected = 0;
@@ -338,14 +398,10 @@ function install(data) {
   $('pick-play').disabled = pickMotion?.admitted === undefined || pickMotion?.ready === undefined;
   $('material-al-card').hidden = !meta.objects.some((item) => item.material === 'AL');
   $('ledger-description').textContent = production ? 'RGB 有效行与编码器一一核对' : '使用 M01 的实际配对结果';
-  $('plant-tools').hidden = !production;
+  paintStation(meta);
   $('plant-materials').hidden = !production;
   $('plant-view').value = 'line';
   $('belt').height = 380;
-  const sharedScanLine = meta.scanX === meta.hsiScanX && meta.scanX === meta.depthScanX;
-  const stations = sharedScanLine ? 'RGB / HSI / 深度共用截面 ' + meta.scanX + ' mm' :
-    'RGB ' + meta.scanX + ' mm · HSI ' + meta.hsiScanX + ' mm · 深度 ' + meta.depthScanX + ' mm';
-  $('plant-stations').textContent = stations + ' · 抓取区 ' + meta.pickBegin + '–' + meta.pickEnd + ' mm';
   paintMaterialCards();
   $('geometry').textContent = (production ? meta.beltLength + ' × ' + meta.beltWidth + ' mm · RGB ' +
     meta.rgbWidth + ' px × ' + meta.packetLines + ' 行/帧 · ' : '') + '每 ' + meta.pitch + ' mm 触发一次 · ' + (meta.speed / 1000).toFixed(1) + ' m/s';
@@ -375,10 +431,51 @@ function install(data) {
     $(anchor).href = '/runs/' + encodeURIComponent(data.id) + '/' + path;
     $(anchor).hidden = false;
   }
-  seek(0);
+  seek(at);
   if (data.bcafError) showMessage(data.bcafError);
-  if (!motionReduced) play();
+  if (autoplay) play();
 }
+
+async function restoreLastRun() {
+  const saved = readLastRun();
+  if (typeof saved?.id !== 'string' || !saved.options) return;
+  const form = $('controls');
+  for (const select of form.querySelectorAll('select')) {
+    const value = String(saved.options[select.name]);
+    if (Array.from(select.options).some((option) => option.value === value)) select.value = value;
+  }
+  changeLayout();
+  paintStationPreview();
+  $('run').disabled = true;
+  status('读取上次回放…');
+  try {
+    const base = '/runs/' + encodeURIComponent(saved.id) + '/';
+    const response = await fetch(base + 'report.json', { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw new Error('回放报告不可用');
+    const restored = await response.json();
+    if (restored.schema !== 1 || !restored.summary?.passed) throw new Error('回放报告格式无效');
+    let bcaf;
+    if (restored.meta.bcafCapture) {
+      bcaf = await fetch(base + 'bcaf/bcaf-report.json', { signal: AbortSignal.timeout(5000) })
+        .then((result) => result.ok ? result.json() : undefined)
+        .catch(() => undefined);
+    }
+    install({ id: saved.id, report: restored, bcaf }, {
+      at: Number.isFinite(saved.time) ? saved.time : 0,
+      autoplay: false,
+    });
+    lastRun = saved;
+  } catch {
+    status('待运行');
+    showMessage('上次的回放文件暂时无法读取。可重新运行当前场景。');
+  } finally {
+    $('run').disabled = false;
+  }
+}
+
+window.addEventListener('pagehide', () => {
+  if (lastRun && readLastRun()?.id === lastRun.id) saveLastRun();
+});
 
 $('controls').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -400,6 +497,12 @@ $('controls').addEventListener('submit', async (event) => {
     const data = await response.json();
     if (!response.ok || data.report?.schema !== 1) throw new Error(data.error || '无法读取仿真事件。');
     install(data);
+    if (data.report.summary.passed) {
+      lastRun = { id: data.id, options: opts };
+      saveLastRun();
+    } else {
+      lastRun = null;
+    }
   } catch (error) {
     status('运行失败', 'warn');
     showMessage(error.message);
@@ -508,7 +611,10 @@ function changeLayout() {
   }
 }
 
-$('controls').elements.layout.addEventListener('change', changeLayout);
+$('controls').elements.layout.addEventListener('change', () => {
+  changeLayout();
+  paintStationPreview();
+});
 $('controls').elements.scenario.addEventListener('change', changeLayout);
 $('controls').elements.inference.addEventListener('change', changeLayout);
 $('plant-view').addEventListener('change', () => {
@@ -520,4 +626,6 @@ onMaterialsReady(() => {
   paint();
 });
 changeLayout();
-paint();
+paintStationPreview();
+void loadProductionPreview();
+void restoreLastRun();

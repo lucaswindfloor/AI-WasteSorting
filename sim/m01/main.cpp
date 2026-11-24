@@ -87,6 +87,7 @@ Options parse(int argc, char** argv) {
 
 void help() {
     std::cout << "m01_sim [--layout demo|production] [--scenario NAME]\n"
+                 "        m01_sim --production-layout prints the production station geometry as JSON\n"
                  "        normal|missing|late|mixed|slow-archive|reconnect\n"
                  "        transport-delay|exposure-delay|compensated|exposure-limit\n"
                  "        clock-missing|count-interpolation|invalid-white|inference-overload|model-switch\n"
@@ -98,11 +99,23 @@ void help() {
                  "        [--rgb-width 16..8192] [--hsi-width 16..640]\n"
                  "        [--hsi-bands 2..224] [--packet-lines 1..8] [--output NEW_DIRECTORY]\n";
 }
+
+void print_production_layout() {
+    const auto& layout = production_layout;
+    std::cout << "{\"layout\":\"production\",\"beltWidth\":" << layout.width
+              << ",\"beltLength\":" << layout.length << ",\"scanX\":" << layout.rgb_x
+              << ",\"hsiScanX\":" << layout.hsi_x << ",\"depthScanX\":" << layout.depth_x
+              << ",\"pickBegin\":" << layout.pick_begin << ",\"pickEnd\":" << layout.pick_end << "}\n";
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         help();
+        return 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--production-layout") {
+        print_production_layout();
         return 0;
     }
     try {

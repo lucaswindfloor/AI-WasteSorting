@@ -147,6 +147,15 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && req.url === '/api/run') return await simulate(req, res);
     if (req.method !== 'GET') return json(res, 405, { error: '不支持此请求。' });
+    if (req.url === '/api/production-layout') {
+      try {
+        const { stdout } = await execute(binary, ['--production-layout'], { timeout: 3000, maxBuffer: 4096 });
+        return json(res, 200, JSON.parse(stdout));
+      } catch (error) {
+        console.error('M01 production layout error:', error.message);
+        return json(res, 503, { error: '台架尺寸读取失败，请运行 make m01-sim。' });
+      }
+    }
     const asset = assets.get(req.url);
     if (asset) return send(res, 200, await readFile(join(here, asset[0])), asset[1]);
     const match = runFile.exec(req.url || '');
