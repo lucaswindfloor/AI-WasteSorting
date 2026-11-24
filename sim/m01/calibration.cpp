@@ -54,7 +54,9 @@ m02::Snapshot calibration(const m01::Config& config, const Layout& layout, Scena
     out.run_id = config.run_id;
     out.generation = config.generation;
     const auto version = ".g" + std::to_string(config.generation);
-    out.versions = {"sim-geometry" + version, "sim-clock" + version, "sim-encoder" + version,
+    const auto geometry = layout.length ? "sim-geometry-" + std::to_string(static_cast<unsigned>(layout.width)) + "mm"
+                                        : "sim-geometry";
+    out.versions = {geometry + version, "sim-clock" + version, "sim-encoder" + version,
                     "sim-dark-white" + version};
     const auto add = [&](m01::Source source, const m01::SourceConfig& device) {
         out.devices.push_back({source, device.device_id, device.firmware, device.sdk, device.session, device.format});

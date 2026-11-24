@@ -118,6 +118,28 @@ export class InferenceView {
     this.lastWindowCount = -1;
   }
 
+  setBcaf(runId, report) {
+    this.bcaf = report;
+    this.bcafPath = '/runs/' + encodeURIComponent(runId) + '/bcaf/';
+    $('bcaf-result').hidden = !report;
+    $('bcaf-report').href = this.bcafPath + 'bcaf-report.json';
+  }
+
+  paintBcaf(row) {
+    if (!this.bcaf) return;
+    const result = this.bcaf.windows.find((item) => item.first === row?.first && item.last === row?.last);
+    const preview = $('bcaf-overlay');
+    preview.hidden = result?.status !== 'completed';
+    if (preview.hidden) preview.removeAttribute('src');
+    else preview.src = this.bcafPath + encodeURIComponent(result.overlay);
+    const labels = Object.entries(result?.classPixelCounts ?? {})
+      .filter(([name, count]) => name !== 'background' && count > 0)
+      .map(([name, count]) => name + ' ' + count + ' px');
+    $('bcaf-window-status').textContent = result?.status === 'completed' ?
+      this.bcaf.device + ' · 前向 ' + millis(result.forwardMs) + ' · ' + (labels.join('、') || '仅背景') :
+      result ? '跳过此窗 · ' + result.reason : '选择已组满的窗口查看分割结果';
+  }
+
   ingest({ type, data, t }) {
     if (type === 'm03-window') {
       this.windows.set(windowKey(data), data);
@@ -216,5 +238,6 @@ export class InferenceView {
     drawInferenceWindow(canvas, segment, meta, row);
     timeline(row);
     displayEvidence(row, this.onSource);
+    this.paintBcaf(row);
   }
 }

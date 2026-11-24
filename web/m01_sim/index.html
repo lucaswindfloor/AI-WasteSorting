@@ -42,6 +42,7 @@
       <label>M03 推理路径<select name="inference">
         <option value="joint">RGB＋HSI 联合</option><option value="split">RGB／HSI 分路</option>
         <option value="rgb" selected>仅 RGB 轮廓</option><option value="hsi">仅 HSI 材质</option><option value="off">关闭 M03</option>
+        <option value="bcaf">BCAF 512 · 离线分割</option>
       </select></label>
       <label>M03 输入要求<select name="masks"><option value="strict">要求完整输入</option><option value="allow">允许部分缺测</option></select></label>
       <button type="submit" class="primary" id="run">运行仿真</button>
@@ -164,6 +165,12 @@
           </table></div>
           <div id="inference-evidence" class="inference-evidence"></div>
         </div>
+      </div>
+      <div id="bcaf-result" class="inference-deployment" hidden>
+        <h3>BCAF 512 离线分割</h3>
+        <p id="bcaf-window-status"></p>
+        <img id="bcaf-overlay" class="bcaf-overlay" alt="BCAF 分割结果叠加在 RGB 扫描图上" hidden>
+        <p><a id="bcaf-report">下载 BCAF 报告</a></p>
       </div>
       <div class="inference-deployment"><h3>模型版本事件</h3><ul id="inference-models"><li>等待模型预热</li></ul></div>
     </section>

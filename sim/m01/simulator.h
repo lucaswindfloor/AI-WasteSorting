@@ -22,6 +22,7 @@ struct Options {
     InferenceMode inference{InferenceMode::Joint};
     bool allow_masks{};
     bool production{};
+    bool export_bcaf{};
 };
 
 struct Report {

@@ -275,6 +275,7 @@ function install(data) {
   const { meta, summary } = report;
   selected = 0;
   reset();
+  inference.setBcaf(data.id, data.bcaf);
   cursor = 0;
   for (const id of ['seek', 'play', 'step', 'jump', 'trigger-input']) $(id).disabled = false;
   $('seek').max = meta.durationMs;
@@ -323,6 +324,7 @@ function install(data) {
     $(anchor).hidden = false;
   }
   seek(0);
+  if (data.bcafError) showMessage(data.bcafError);
   if (!motionReduced) play();
 }
 
@@ -336,10 +338,11 @@ $('controls').addEventListener('submit', async (event) => {
   const opts = Object.fromEntries(new FormData(event.currentTarget));
   opts.speed = Number(opts.speed);
   opts.packetLines = Number(opts.packetLines);
+  if (opts.inference === 'bcaf') opts.masks = 'strict';
   try {
     const response = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts),
-      signal: AbortSignal.timeout(125000),
+      signal: AbortSignal.timeout(opts.inference === 'bcaf' ? 370000 : 125000),
     });
     const data = await response.json();
     if (!response.ok || data.report?.schema !== 1) throw new Error(data.error || '无法读取仿真事件。');
@@ -418,7 +421,7 @@ function changeLayout() {
     const current = select.value;
     for (const option of select.options) {
       option.hidden = Boolean(values && !values.includes(option.value)) ||
-        (!production && option.value === 'rgb-frame-loss');
+        (!production && ['rgb-frame-loss', 'bcaf'].includes(option.value));
       option.disabled = option.hidden;
     }
     if (select.selectedOptions[0]?.disabled || !current) {
@@ -427,7 +430,10 @@ function changeLayout() {
   };
   filter('scenario', production ? ['normal', 'rgb-frame-loss'] : null);
   filter('speed', production ? ['1000', '2000', '3000'] : null);
-  filter('inference', production ? ['rgb', 'off'] : null);
+  filter('inference', production ? ['rgb', 'off', 'bcaf'] : null);
+  const bcaf = form.elements.inference.value === 'bcaf';
+  if (bcaf) form.elements.masks.value = 'strict';
+  form.elements.masks.disabled = bcaf;
   for (const name of ['profile', 'packetLines']) {
     form.elements[name].disabled = production;
     form.elements[name].closest('label').hidden = production;
@@ -435,6 +441,7 @@ function changeLayout() {
 }
 
 $('controls').elements.layout.addEventListener('change', changeLayout);
+$('controls').elements.inference.addEventListener('change', changeLayout);
 $('plant-view').addEventListener('change', () => {
   $('belt').height = $('plant-view').value === 'infeed' ? 555 : 380;
   paint();

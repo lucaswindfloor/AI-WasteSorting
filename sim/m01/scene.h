@@ -46,7 +46,7 @@ struct Layout {
 
 inline constexpr Layout demo_layout{belt_width, 0, scan_x, scan_x, scan_x, pitch_mm, trigger_count, 0, 0, materials};
 inline constexpr double production_scan_x = 750;
-inline constexpr Layout production_layout{1000, 5500, production_scan_x, production_scan_x, production_scan_x,
+inline constexpr Layout production_layout{800, 5500, production_scan_x, production_scan_x, production_scan_x,
                                            1, 2560, 2400, 2900, production_materials};
 
 std::span<const ProfileStation> footprint(const Material& item);

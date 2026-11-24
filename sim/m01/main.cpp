@@ -42,6 +42,10 @@ Options parse(int argc, char** argv) {
     bool scenario_set{}, inference_set{};
     for (int i = 1; i < argc; ++i) {
         const std::string_view option = argv[i];
+        if (option == "--export-bcaf") {
+            out.export_bcaf = true;
+            continue;
+        }
         if (++i >= argc) throw std::invalid_argument("missing option value");
         const std::string_view value = argv[i];
         if (option == "--scenario") {
@@ -88,6 +92,7 @@ void help() {
                  "        production uses normal|rgb-frame-loss, RGB/off and 1000..3000 mm/s\n"
                  "        [--speed-mm-s 500..3000] [--depth independent|encoder]\n"
                  "        [--m03 off|rgb|hsi|split|joint] [--m03-mask strict|allow]\n"
+                 "        [--export-bcaf] export calibrated production RGB+HSI for offline inference\n"
                  "        [--rgb-width 16..8192] [--hsi-width 16..640]\n"
                  "        [--hsi-bands 2..224] [--packet-lines 1..8] [--output NEW_DIRECTORY]\n";
 }

@@ -1,4 +1,5 @@
 #include "simulator.h"
+#include "bcaf_export.h"
 #include "calibration.h"
 #include "inference.h"
 
@@ -326,6 +327,7 @@ public:
 private:
     const Options& opts_;
     const Layout& layout_;
+    std::optional<BcafExport> bcaf_;
     Tick interval_;
     unsigned hsi_step_;
     std::size_t window_rows_, window_step_;
@@ -661,6 +663,7 @@ void Simulation::calibrate(Tick now, const Session& session, const std::shared_p
         return;
     }
     const auto& versions = result.snapshot->versions;
+    if (bcaf_) bcaf_->append(result, layout_);
     for (const auto& group : result.triggers) {
         const auto global = static_cast<unsigned>(session.base + group.source.event.key.id);
         check(coverage_.emplace(global, group.coverage_status).second,
@@ -764,7 +767,8 @@ void Simulation::activate_inference(const Session& session, const m02::Snapshot&
     SimulationBackend backend(delay);
     m03::Activation activation{session.config.first_expected_trigger.value(), {}};
     for (auto route : routes_) {
-        auto manifest = inference_manifest(route, session.config, snapshot, std::to_string(generation), opts_.allow_masks, window_rows_, window_step_, budget_);
+        auto manifest = inference_manifest(route, session.config, snapshot, layout_, std::to_string(generation),
+                                           opts_.allow_masks, window_rows_, window_step_, budget_);
         const auto identity = manifest.identity;
         activation.models.push_back(identity.key);
         m03_.install(std::move(manifest), inference_artifact(identity.key.version), backend);
@@ -777,7 +781,8 @@ void Simulation::activate_inference(const Session& session, const m02::Snapshot&
 
 void Simulation::reject_candidate(const Session& next, Tick now) {
     const auto snapshot = calibration(next.config, layout_, opts_.scenario, interval_);
-    auto candidate = inference_manifest(routes_.back(), next.config, snapshot, "candidate", opts_.allow_masks, window_rows_, window_step_, budget_);
+    auto candidate = inference_manifest(routes_.back(), next.config, snapshot, layout_, "candidate",
+                                        opts_.allow_masks, window_rows_, window_step_, budget_);
     if (candidate.hsi) std::swap(candidate.hsi->bands[0], candidate.hsi->bands[1]);
     else ++candidate.raster.left;
     const auto identity = candidate.identity;
@@ -1131,6 +1136,7 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"layout", quote(opts_.production ? "production" : "demo")}, {"pitch", decimal(layout_.pitch)}, {"depthMode", quote(opts_.depth == DepthMode::Encoder ? "encoder" : "independent")},
         {"m03Mode", quote(name(opts_.inference))}, {"m03Mask", quote(opts_.allow_masks ? "allow" : "strict")},
         {"m03Rows", std::to_string(window_rows_)}, {"m03Step", std::to_string(window_step_)},
+        {"bcafCapture", opts_.export_bcaf ? "1" : "null"},
         {"m03BudgetMs", time(budget_)},
         {"durationMs", time(latest_)}, {"beltWidth", decimal(layout_.width)}, {"scanX", decimal(layout_.rgb_x)},
         {"beltLength", decimal(layout_.length)}, {"depthScanX", decimal(layout_.depth_x)},
@@ -1188,6 +1194,7 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
 }
 
 Report Simulation::execute() {
+    if (opts_.export_bcaf) bcaf_.emplace(opts_.output);
     if (opts_.scenario == Scenario::Reconnect || opts_.scenario == Scenario::ModelSwitch) {
         auto one = settings(opts_, 1, interval_);
         const auto count = layout_.lines / 2;
@@ -1210,6 +1217,7 @@ Report Simulation::execute() {
     if (sealed.value) {
         log(latest_, "seal", object({{"manifest", std::to_string(sealed.value->version)}}));
     }
+    if (bcaf_) bcaf_->finish();
     return verify();
 }
 
@@ -1238,6 +1246,9 @@ std::string_view name(Scenario scenario) {
 }
 
 Report run(const Options& options) {
+    if (options.export_bcaf && (!options.production || options.inference != InferenceMode::Rgb || options.allow_masks)) {
+        throw std::invalid_argument("--export-bcaf requires production, --m03 rgb and --m03-mask strict");
+    }
     if (options.production && (options.speed_mm_s < 1000 || options.speed_mm_s > 3000 ||
         (options.scenario != Scenario::Normal && options.scenario != Scenario::RgbFrameLoss) ||
         (options.inference != InferenceMode::Rgb && options.inference != InferenceMode::Off))) {

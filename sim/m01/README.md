@@ -6,17 +6,17 @@
 
 | 参数 | 仿真假设 |
 | --- | --- |
-| 传送带 | 长 5,500 mm，宽 1,000 mm，位置自入料端向下游计 |
+| 传送带 | 长 5,500 mm，宽 800 mm，位置自入料端向下游计 |
 | 工位 | RGB、HSI、深度共用距入料端 750 mm 的扫描截面，抓取区 2,400–2,900 mm |
 | 物料 | PET 饮料瓶 210 × 66 mm，铝饮料罐 122 × 66 mm。俯视图为生成的透明素材，模拟 RGB 行也从该纹理取样 |
 | RGB | 8,192 像素 RGB8，1 mm 定距触发，20 个名义编码器计数/行，128 行/帧 |
 | 高光谱 | 640 点 × 224 模拟波段，独立触发，在 1、2、3 m/s 时采用 5、10、15 mm 行距 |
-| 深度 | 下游独立采样，默认每 12 ms 一次。仍可选每 8 次 RGB 编码器触发采样 |
-| M03 | 每 512 RGB 行组成窗口，步长 128 行。模型网格为 128 行 × 250 列，约 4 mm 横纵采样，保留原始帧、行、列与带坐标引用 |
+| 深度 | 同一截面独立采样，默认每 12 ms 一次。仍可选每 8 次 RGB 编码器触发采样 |
+| M03 | 每 512 RGB 行组成窗口，步长 128 行。模拟规则网格为 128 行 × 200 列，约 4 mm 横纵采样，保留原始帧、行、列与带坐标引用 |
 
 M01 的 `RgbTriggered` 模式只等待 RGB 的触发归属。HSI 和深度采样在同一带面截面进行，各自保留曝光时刻和锁存位移并独立交付。M03 执行 RGB 轮廓规则，HSI 暗白校正和深度投影可从 M02 回放。试验图中的抓取区表示工位和计算时效。实装时需确认三个设备的实际观测面、照明与触发时序。
 
-网页「全线」和「入料与扫描段」采用同一毫米坐标，物料图跟随编码器位移。点击「跳到首个候选」可以定位 512 行窗口及其原始 RGB 源行。窗口预览横轴是沿带 512 mm，纵轴是跨带 1,000 mm，两轴等比例，沿带每 128 mm 标一段。仿真从 RGB 至抓取区起点的行程时间扣留 200 ms 作为示例下游余量，其余时间用作 M03 截止。工位位置、余量和物料尺寸是可替换的设计假设。
+网页「全线」和「入料与扫描段」采用同一毫米坐标，物料图跟随编码器位移。点击「跳到首个候选」可以定位 512 行窗口及其原始 RGB 源行。窗口预览横轴是沿带 512 mm，纵轴是跨带 800 mm，两轴等比例，沿带每 128 mm 标一段。仿真从 RGB 至抓取区起点的行程时间扣留 200 ms 作为示例下游余量，其余时间用作 M03 截止。工位位置、余量和物料尺寸是可替换的设计假设。
 
 以下各节同时适用于原有的「演示」布局。演示继续提供共享触发、联合推理和时钟故障场景。
 
@@ -132,11 +132,64 @@ build/m01_sim --scenario normal --speed-mm-s 2000 \
 
 模拟后端从 RGB 前景颜色和高光谱端点的亮度及谱形生成候选。PET 与 Al 是本仿真场景的材质标签。时间和队列用于软件链路验收，实际物料准确率与运行性能由真实模型和目标工控机上的实测数据评估。
 
+## 6. BCAF 512 离线分割
+
+生产布局可把 M02 验证过的 RGB 扫描行和暗白校正后的独立 HSI 导出。BCAF 复用实际 M03 的组窗与缺行判定，在 C++ 仿真结束后逐窗运行。每窗覆盖跨带 800 mm、沿带 512 mm。RGB 有效区域为 328 行 × 512 列，HSI 为 164 行 × 256 列。两路按编码器位置对应同一块皮带，等比例调整并在上下补边，输入分别为 RGB `[1,3,512,512]` 和 HSI `[1,225,256,256]`。第 225 个光谱通道补零。HSI 在已校正的扫描行之间按位置插值，采集首尾的边缘延拓限制在一个名义 HSI 行距内，并计入报告。中间缺行超出一个行距时跳过相关窗口。
+
+BCAF 使用公开的 RGB-512／HSI-5 网络和 SpectralWaste 的 7 类输出。PET 瓶和铝罐的仿真光谱是合成值。实测识别需核对训练与实机的波段中心、波段顺序、辐射单位和类别定义。离线报告记录模型前向的实际耗时与扣除补边的分割图。浏览器原有的 M03 候选、队列和时限仍显示 RGB 规则链路的模拟数据。
+
+### 安装与命令行验证
+
+在本仓库根目录执行以下命令。CPU 测试使用 PyTorch 2.7.1。使用 NVIDIA GPU 时，可在虚拟环境安装适配本机显卡驱动的 PyTorch 和 torchvision，运行时加 `--device cuda:0`。
+
+```sh
+git clone https://github.com/jonasvilhofunk/BCAF_2026.git ../BCAF_2026
+git -C ../BCAF_2026 checkout cacb77e3ba5d95ad4df1cac5d7117ff48034eb35
+python3.12 -m venv ../.venv-bcaf
+source ../.venv-bcaf/bin/activate
+python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.1 torchvision==0.22.1
+python -m pip install numpy Pillow PyYAML timm
+make -j4 m01-sim
+build/m01_sim --layout production --export-bcaf --output build/bcaf-capture
+python sim/m01/bcaf_infer.py --run build/bcaf-capture --bcaf-repo ../BCAF_2026 \
+  --smoke-random --limit 1 --output build/bcaf-smoke
+```
+
+`--smoke-random` 使用未训练权重检查两路张量、真实网络前向和分割图输出。测试官方模型时，从作者的 [Hugging Face 权重库](https://huggingface.co/jonasvilhofunk/BCAF_2026/tree/main) 下载完整的 `BCAF_SpectralWaste_rgb512_hsi5_best.pth`，例如放到 `../BCAF_2026/models/paper/`。可以复用上一步的采集目录。以下命令用合成反射率检查训练权重加载和分割链路。
+
+```sh
+checkpoint=../BCAF_2026/models/paper/BCAF_SpectralWaste_rgb512_hsi5_best.pth
+python sim/m01/bcaf_infer.py --run build/bcaf-capture --bcaf-repo ../BCAF_2026 \
+  --checkpoint "$checkpoint" --sim-reflectance --output build/bcaf-predictions
+```
+
+验证作者原始数据时，从 [SpectralWaste](https://github.com/ferpb/spectralwaste-segmentation) 下载原始 RGB／HSI，按 BCAF 的 `scripts/Preprocess.ipynb` 生成配对 `.npz` 和训练集的 `hsi_stats.yaml`。然后选一个 test 配对运行。此入口按 BCAF 原始评估预处理直接预测该图。
+
+```sh
+python sim/m01/bcaf_infer.py --npz /path/to/test-sample.npz --bcaf-repo ../BCAF_2026 \
+  --hsi-stats /path/to/hsi_stats.yaml --checkpoint "$checkpoint" --output build/bcaf-test-image
+```
+
+各输出目录会保存 `bcaf-report.json`、类别索引图 `*-mask.png` 和叠加图 `*-overlay.png`。报告按触发范围列出窗口、丢帧时的跳过原因、像素到皮带毫米坐标的边界、有效图像范围、权重摘要和前向耗时。重复验证时请换一个输出目录。
+
+### 网页分割回放
+
+激活同一个 Python 环境，在本仓库根目录启动服务。
+
+```sh
+M01_SIM_BCAF_REPO=../BCAF_2026 M01_SIM_BCAF_CHECKPOINT="$checkpoint" \
+  M01_SIM_BCAF_PYTHON="$(command -v python)" node web/m01_sim/server.mjs
+```
+
+在生产布局中选择「BCAF 512 · 离线分割」，然后运行仿真。点「跳到首个候选」或切换「回放窗口」，在 M03 面板查看该窗叠加图与前向耗时。默认设备是 CPU，可以通过 `M01_SIM_BCAF_DEVICE=cuda:0` 切换。网页默认直接使用仿真反射率，可用 `M01_SIM_BCAF_HSI_STATS` 指向与输入单位一致的训练统计文件。
+
 ## 代码位置
 
 - `sim/m01/scene.*` 从同一场景计算 RGB 行、合成光谱和深度。
 - `sim/m01/calibration.*` 为每个设备世代生成标定快照，并定义时钟和曝光故障场景。
 - `sim/m01/inference.*` 构建模型清单、校验模拟制品，并从张量生成物料候选。
+- `sim/m01/bcaf_export.*` 导出经 M02 校验的 RGB 行、HSI 位置和校正光谱。
+- `sim/m01/bcaf_infer.py` 配准、组图、运行 BCAF 并保存分割结果。
 - `sim/m01/simulator.*` 推进时间，衔接 M01、M02、M03 和 M09，核验并写报告。
 - `sim/m01/main.cpp` 提供命令行参数和运行结果。
 - `web/m01_sim/` 使用本机服务调用同一程序，播放数据并定位触发。

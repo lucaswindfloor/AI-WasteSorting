@@ -3,6 +3,7 @@
 import csv
 import json
 import math
+import struct
 import subprocess
 import sys
 from collections import Counter
@@ -263,6 +264,8 @@ def run_plant(binary, root, speed, scenario):
     out = root / f"plant-{speed}"
     command = [binary, "--layout", "production", "--speed-mm-s", str(speed),
                "--scenario", scenario, "--output", str(out)]
+    if scenario == "rgb-frame-loss":
+        command.append("--export-bcaf")
     run = subprocess.run(command, capture_output=True, text=True, timeout=180)
     assert run.returncode == 0, run.stdout + run.stderr
     report = json.loads((out / "report.json").read_text())
@@ -273,7 +276,7 @@ def run_plant(binary, root, speed, scenario):
 
     assert meta["layout"] == "production"
     assert (meta["beltLength"], meta["beltWidth"], meta["scanX"], meta["hsiScanX"], meta["depthScanX"]) == (
-        5500, 1000, 750, 750, 750)
+        5500, 800, 750, 750, 750)
     assert meta["scanX"] < meta["beltLength"] / 4
     assert meta["depthScanX"] < meta["pickBegin"] < meta["pickEnd"] < meta["beltLength"]
     assert [(item["length"], item["width"]) for item in meta["objects"]] == [(210, 66), (122, 66)]
@@ -297,16 +300,35 @@ def run_plant(binary, root, speed, scenario):
     depth = [entry["observation"] for entry in events("m02-depth")]
     assert len(depth) == summary["depth"] > 0
     assert all(row["measured"][0][0] == meta["scanX"] for row in rgb_aligned + depth)
+    assert all(0 <= point[1] <= 800 for row in rgb_aligned + depth for point in row["measured"])
     complete = [row for row in events("m03-window") if row["state"] != "retired"]
     assert [(row["first"], row["last"]) for row in complete] == [
         (first, first + 511) for first in range(1, 2050, 128)]
     assert all(row["finishedMs"] < row["deadlineMs"] for row in complete)
     assert all(row["readyMs"] >= row["last"] * 1000 / speed - 0.01 for row in complete)
+    valid = [row for row in complete if row["state"] in ("completed", "no_detection")]
+    assert len(valid) == 17 - 4 * missing
+    assert all(row["quality"]["rgb"]["total"] == 128 * 200 * 3 for row in valid)
     assert {row["first"] for row in complete if row["state"] == "input_invalid"} == (
         {1, 129, 257, 385} if missing else set())
     candidates = [candidate for row in complete for candidate in row["evidence"]]
     assert any(300 < c["rgb"]["belt"][1] < 370 for c in candidates)  # PET in its lateral lane.
     assert any(615 < c["rgb"]["belt"][1] < 685 for c in candidates)  # Al in its lateral lane.
+    if missing:
+        assert meta["bcafCapture"] == 1
+        rgb_file, hsi_file = out / "bcaf-rgb.u8", out / "bcaf-hsi.f32le"
+        rgb_stride = 3 * meta["rgbWidth"]
+        hsi_stride = 4 * (1 + meta["hsiWidth"] * meta["hsiBands"])
+        assert rgb_file.stat().st_size == summary["expected"] * rgb_stride
+        assert hsi_file.stat().st_size == len(hsi) * hsi_stride
+        with rgb_file.open("rb") as f:
+            f.seek(384 * rgb_stride)
+            assert f.read(128 * rgb_stride) == bytes(128 * rgb_stride)
+            assert any(f.read(rgb_stride))
+        with hsi_file.open("rb") as f:
+            travel, reflectance = struct.unpack("<ff", f.read(8))
+            assert travel == meta["hsiPitch"]
+            assert abs(reflectance - (280 - 100) / 30000) < 1e-7
     print(f"production {speed} mm/s {scenario}: {summary['rgbRows']} RGB, {len(hsi)} HSI, {len(complete)} M03 windows")
 
 

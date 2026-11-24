@@ -156,6 +156,7 @@ tr.selected { background: #213c51; }
 .inference-deployment { margin-top: 12px; border-top: 1px solid #273a50; padding-top: 10px; }
 .inference-deployment ul { margin: 0; padding-left: 1rem; }
 .inference-deployment li.model-rejected { color: #ffc886; }
+.bcaf-overlay { max-width: min(100%, 512px); height: auto; }
 #inference-window { max-width: 100%; }
 @media (max-width: 620px) {
   .inference-details th, .inference-details td { padding-inline: .28rem; font-size: .72rem; }
