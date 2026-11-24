@@ -62,8 +62,15 @@
         </div>
         <canvas id="belt" width="1000" height="380" aria-label="传送带顶视图，显示物料、编码器位置和扫描线" role="img"></canvas>
         <div id="pick-replay" class="pick-replay" hidden>
-          <div class="transport"><h3>单瓶跟踪与抓取</h3>
-            <button type="button" id="pick-jump" disabled>跳到接触</button></div>
+          <div class="pick-replay-head">
+            <h3>抓取工位近景</h3>
+            <button type="button" id="pick-play" disabled>慢放抓取</button>
+            <button type="button" id="pick-jump" disabled>跳到接触</button>
+          </div>
+          <canvas id="pick-motion" width="960" height="455" role="img"
+            aria-label="传送带、吸盘机械爪和投放箱的抓取动作示意"></canvas>
+          <p id="pick-motion-stage" class="pick-motion-stage" role="status"></p>
+          <p class="pick-motion-note">按控制器事件时间回放，事件之间的运动路径为示意。</p>
           <p id="pick-center"></p>
           <p id="pick-contact"></p>
           <p id="pick-progress" role="status"></p>

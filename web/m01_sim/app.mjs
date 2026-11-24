@@ -1,6 +1,7 @@
 import { CalibrationView } from './calibration.mjs';
-import { distanceAt, drawAlignedPreview, drawBelt, drawMaterialCard, drawPreview, onMaterialsReady } from './drawing.mjs';
+import { distanceAt, drawAlignedPreview, drawBelt, drawMaterialCard, drawPreview, drawSprite, onMaterialsReady } from './drawing.mjs';
 import { InferenceView, windowKey } from './inference.mjs';
+import { createPickMotion, drawPickMotion, pickMotionLabels, samplePickMotion } from './pick-motion.mjs';
 
 const $ = (id) => document.getElementById(id);
 const names = {
@@ -39,6 +40,7 @@ let health = {};
 let firstGap = null;
 let firstCandidate = null;
 let picking = {};
+let pickMotion = null;
 const pickStages = { receipt: '控制器已收件', admitted: '运动已准入', contact: '已接触',
   holding: '末端已持物', 'placement-ended': '投放动作结束', released: '已释放到模拟测试箱',
   finished: '机器人动作结束', 'robot-ready': '机器人已回位', 'resources-released': '资源已归还',
@@ -205,6 +207,14 @@ function paint() {
   drawBelt($('belt'), meta, cursor, latestTrigger, latestPacket, latestDiagnostic,
     $('inference-overlay').checked ? inference.current()?.evidence : undefined, $('plant-view').value, picking);
   paintPick(meta);
+  if (pickMotion) {
+    const travel = distanceAt(meta, cursor);
+    const contactTravel = pickMotion.contact ? distanceAt(meta, pickMotion.contact.time) : 0;
+    const pose = samplePickMotion(pickMotion, cursor, travel, contactTravel);
+    const stage = pickMotionLabels[pose.stage];
+    if ($('pick-motion-stage').textContent !== stage) $('pick-motion-stage').textContent = stage;
+    drawPickMotion($('pick-motion'), meta, pickMotion, pose, travel, drawSprite);
+  }
   $('current-pulse').textContent = '触发 ' + (latestTrigger?.trigger ? '#' + latestTrigger.trigger : '—');
   $('time').textContent = cursor.toFixed(1) + ' ms';
   $('seek').value = cursor;
@@ -262,9 +272,11 @@ function pause() {
   $('play').textContent = '播放';
 }
 
-function play() {
+function play(rate, stopAt) {
   if (!report || playing) return;
-  if (cursor >= report.meta.durationMs) seek(0);
+  const end = Math.min(report.meta.durationMs, stopAt ?? report.meta.durationMs);
+  const speed = rate ?? (report.meta.layout === 'production' ? 0.25 : 0.043);
+  if (cursor >= end) seek(0);
   playing = true;
   $('play').textContent = '暂停';
   let previous;
@@ -272,8 +284,8 @@ function play() {
     if (!playing) return;
     const realDelta = previous === undefined ? 0 : Math.min(now - previous, 50);
     previous = now;
-    seek(cursor + realDelta * (report.meta.layout === 'production' ? 0.25 : 0.043));
-    if (cursor >= report.meta.durationMs) pause();
+    seek(Math.min(end, cursor + realDelta * speed));
+    if (cursor >= end) pause();
     else frame = requestAnimationFrame(animate);
   };
   frame = requestAnimationFrame(animate);
@@ -320,8 +332,10 @@ function install(data) {
   firstCandidate = report.events.find((event) => event.type === 'm03-window' && event.data.state === 'completed');
   $('inference-first').disabled = !firstCandidate;
   const production = meta.layout === 'production';
-  $('pick-replay').hidden = !meta.scenario.startsWith('pet-');
-  $('pick-jump').disabled = !report.events.some((event) => event.type === 'pick-action' && event.data.state === 'contact');
+  pickMotion = meta.scenario.startsWith('pet-') ? createPickMotion(report) : null;
+  $('pick-replay').hidden = !pickMotion;
+  $('pick-jump').disabled = !pickMotion?.contact;
+  $('pick-play').disabled = pickMotion?.admitted === undefined || pickMotion?.ready === undefined;
   $('material-al-card').hidden = !meta.objects.some((item) => item.material === 'AL');
   $('ledger-description').textContent = production ? 'RGB 有效行与编码器一一核对' : '使用 M01 的实际配对结果';
   $('plant-tools').hidden = !production;
@@ -396,11 +410,16 @@ $('controls').addEventListener('submit', async (event) => {
 });
 $('play').addEventListener('click', () => playing ? pause() : play());
 $('pick-jump').addEventListener('click', () => {
-  const contact = report?.events.find((event) => event.type === 'pick-action' && event.data.state === 'contact');
+  const contact = pickMotion?.contact;
   if (contact) {
     pause();
-    seek(contact.t);
+    seek(contact.time);
   }
+});
+$('pick-play').addEventListener('click', () => {
+  pause();
+  seek(pickMotion.admitted);
+  play(0.05, pickMotion.ready);
 });
 $('step').addEventListener('click', () => {
   pause();

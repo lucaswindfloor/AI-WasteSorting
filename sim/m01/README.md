@@ -195,7 +195,7 @@ build/m01_sim --layout production --scenario pet-pick --output build/pet-pick
 make m01-pick-test
 ```
 
-也可以重启 `node web/m01_sim/server.mjs`，打开本机 `http://127.0.0.1:8081`，选择「单 PET 瓶 · 跟踪与抓取」。回放会画出青色的轮廓面积中心和黄色的吸盘接触点，并显示参考计数、E05 依据、接触窗与 M07 状态。点「跳到接触」可以直接查看抓取时刻。下载的事件 JSON 保留 `pick-window`、`pick-position`、`pick-eligibility`、`pick-task` 和 `pick-action` 等事件。
+也可以重启 `node web/m01_sim/server.mjs`，打开本机 `http://127.0.0.1:8081`，选择「单 PET 瓶 · 跟踪与抓取」。回放会画出青色的轮廓面积中心和黄色的吸盘接触点，并显示参考计数、E05 依据、接触窗与 M07 状态。在「抓取工位近景」点「慢放抓取」，可以看到吸盘接近、下降、携瓶、向测试箱释放和回位。也可以点「跳到接触」或拖动时间轴查看某一帧。接触位置和执行时刻取自报告，取放之间的轨迹和料箱布置为示意。下载的事件 JSON 保留 `pick-window`、`pick-position`、`pick-eligibility`、`pick-task` 和 `pick-action` 等事件。
 
 此组场景固定使用 800 mm 带宽、1 m/s 带速、每 128 行滑动一次的 512 行 RGB 窗口和 4 ms 独立模拟 E05 采样。M04 根据实收 RGB 轮廓建立单件目标，边缘截断窗仅留诊断。M05 的单瓶吸盘配方使用模拟 E05 网格与独立检查过的模拟接触面，通过后走未知料测试箱。M06 使用接触点、速度范围和计数参考算时间，M07 经模拟控制器和 M09 命令日志走完收件、持物、释放与回位。真实设备的采样覆盖、吸盘与控制协议需要单独测量。重复运行时请换一个输出目录。
 

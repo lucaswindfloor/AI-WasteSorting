@@ -27,6 +27,7 @@ const assets = new Map([
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/app.mjs', ['app.mjs', 'text/javascript; charset=utf-8']],
   ['/drawing.mjs', ['drawing.mjs', 'text/javascript; charset=utf-8']],
+  ['/pick-motion.mjs', ['pick-motion.mjs', 'text/javascript; charset=utf-8']],
   ['/calibration.mjs', ['calibration.mjs', 'text/javascript; charset=utf-8']],
   ['/inference.mjs', ['inference.mjs', 'text/javascript; charset=utf-8']],
   ['/assets/materials.png', ['assets/materials.png', 'image/png']],

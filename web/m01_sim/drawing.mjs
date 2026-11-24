@@ -11,7 +11,7 @@ export function onMaterialsReady(paint) {
   sprite.addEventListener('load', paint, { once: true });
 }
 
-function drawSprite(ctx, material, left, top, width, height) {
+export function drawSprite(ctx, material, left, top, width, height) {
   const bounds = spriteRects[material];
   if (!bounds || !sprite.complete || !sprite.naturalWidth) return false;
   ctx.drawImage(sprite, ...bounds, left, top, width, height);

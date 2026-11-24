@@ -64,6 +64,13 @@ button.primary:hover:not(:disabled) { background: #a5f4f9; }
 .station { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(310px, .95fr); gap: 13px; margin-bottom: 13px; }
 .conveyor, .ledger, .sensor, .outcome { min-width: 0; }
 canvas { width: 100%; height: auto; display: block; border: 1px solid #2b4357; border-radius: 9px; }
+.pick-replay { margin-top: 12px; }
+.pick-replay-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.pick-replay-head h3 { flex: 1 1 auto; font-size: 1rem; }
+.pick-replay-head button { min-height: 32px; padding: 4px 8px; font-size: .81rem; }
+.pick-replay p { margin-top: 4px; font-size: .81rem; }
+.pick-motion-stage { color: var(--cyan); font-weight: 650; }
+.pick-motion-note { color: var(--muted); }
 .transport {
   display: grid; grid-template-columns: auto auto minmax(30px, 1fr) minmax(66px, auto);
   align-items: center; gap: 8px; margin: 11px 0 14px;
