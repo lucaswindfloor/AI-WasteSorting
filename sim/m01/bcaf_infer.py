@@ -32,6 +32,31 @@ def load_stats(path):
     return mean[:, None, None], std.masked_fill(std == 0, 1e-6)[:, None, None]
 
 
+def normalize_checkpoint(state, expected_keys):
+    for name in ("state_dict", "model_state_dict", "model"):
+        if isinstance(state, Mapping) and isinstance(state.get(name), Mapping):
+            state = state[name]
+            break
+    if not isinstance(state, Mapping):
+        raise ValueError("checkpoint must contain a BCAF state dictionary")
+
+    clean = {}
+    prefixes = ("module.", "_orig_mod.", "model.", "net.", "student.", "ema_model.", "unwrapped_model.")
+    for key, value in state.items():
+        while prefix := next((p for p in prefixes if key.startswith(p)), None):
+            key = key.removeprefix(prefix)
+        branch, _, suffix = key.partition(".")
+        # Released fusion checkpoints can store the two backbones directly under their branches.
+        if key not in expected_keys and branch in {"rgb_model", "hsi_model"}:
+            wrapped = f"{branch}.backbone.{suffix}"
+            if wrapped in expected_keys:
+                key = wrapped
+        if key in clean:
+            raise ValueError(f"duplicate parameter after normalizing checkpoint keys: {key}")
+        clean[key] = value
+    return clean
+
+
 def load_model(repo, checkpoint, device):
     sys.path.insert(0, str(repo.resolve()))
     from pyfunctions.build_model import CrossAttentionFusionModel
@@ -41,25 +66,11 @@ def load_model(repo, checkpoint, device):
         key = f"{sensor}_model_config_path"
         config[key] = str(repo / config[key])
         config[f"{sensor}_checkpoint_path"] = None
-    clean = {}
-    if checkpoint:
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        for name in ("state_dict", "model_state_dict", "model"):
-            if isinstance(state, Mapping) and isinstance(state.get(name), Mapping):
-                state = state[name]
-                break
-        if not isinstance(state, Mapping):
-            raise ValueError("checkpoint must contain a BCAF state dictionary")
-        prefixes = ("module.", "_orig_mod.", "model.", "net.", "student.", "ema_model.", "unwrapped_model.")
-        for key, value in state.items():
-            while prefix := next((p for p in prefixes if key.startswith(p)), None):
-                key = key.removeprefix(prefix)
-            if key in clean:
-                raise ValueError(f"duplicate parameter after normalizing checkpoint keys: {key}")
-            clean[key] = value
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True) if checkpoint else None
     torch.manual_seed(0)
     model = CrossAttentionFusionModel(config, len(CLASSES), torch.device("cpu"))
     if checkpoint:
+        clean = normalize_checkpoint(state, model.state_dict().keys())
         model.load_state_dict(clean, strict=True)
     return model.to(device).eval(), config
 

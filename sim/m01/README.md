@@ -157,6 +157,8 @@ python sim/m01/bcaf_infer.py --run build/bcaf-capture --bcaf-repo ../BCAF_2026 \
 
 `--smoke-random` 使用未训练权重检查两路张量、真实网络前向和分割图输出。测试官方模型时，从作者的 [Hugging Face 权重库](https://huggingface.co/jonasvilhofunk/BCAF_2026/tree/main) 下载完整的 `BCAF_SpectralWaste_rgb512_hsi5_best.pth`，例如放到 `../BCAF_2026/models/paper/`。可以复用上一步的采集目录。以下命令用合成反射率检查训练权重加载和分割链路。
 
+加载器会把发布权重中省略 `backbone` 层级的 RGB／HSI 键映射到模型已有的键，再严格核对全部键和张量形状。原始 `.pth` 可直接使用。
+
 ```sh
 checkpoint=../BCAF_2026/models/paper/BCAF_SpectralWaste_rgb512_hsi5_best.pth
 python sim/m01/bcaf_infer.py --run build/bcaf-capture --bcaf-repo ../BCAF_2026 \
