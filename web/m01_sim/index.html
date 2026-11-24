@@ -20,6 +20,10 @@
         <option value="mixed">高光谱漏行与晚到</option><option value="normal" selected>正常采集</option>
         <option value="rgb-frame-loss">RGB 整帧丢失</option>
         <option value="pet-pick">单 PET 瓶 · 跟踪与抓取</option>
+        <option value="pet-mujoco">单 PET 瓶 · MuJoCo 抓取</option>
+        <option value="pet-mujoco-slow">MuJoCo · 升降太慢</option>
+        <option value="pet-mujoco-offset">MuJoCo · 横向偏移</option>
+        <option value="pet-mujoco-receipt-loss">MuJoCo · 发令效果待核</option>
         <option value="pet-depth-loss">单 PET 瓶 · 抓区深度缺测</option>
         <option value="pet-encoder-loss">单 PET 瓶 · 跟踪计数中断</option>
         <option value="pet-receipt-loss">单 PET 瓶 · 发令效果待核</option>
@@ -70,7 +74,7 @@
           <canvas id="pick-motion" width="960" height="455" role="img"
             aria-label="传送带、吸盘机械爪和投放箱的抓取动作示意"></canvas>
           <p id="pick-motion-stage" class="pick-motion-stage" role="status"></p>
-          <p class="pick-motion-note">按控制器事件时间回放，事件之间的运动路径为示意。</p>
+          <p id="pick-motion-note" class="pick-motion-note">按控制器事件时间回放，事件之间的运动路径为示意。</p>
           <p id="pick-center"></p>
           <p id="pick-contact"></p>
           <p id="pick-progress" role="status"></p>

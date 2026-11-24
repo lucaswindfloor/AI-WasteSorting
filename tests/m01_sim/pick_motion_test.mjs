@@ -56,3 +56,22 @@ test('uncertain or missing controller effects never animate a completed pick', (
     assert.equal(pose.stage, expectedStage);
   }
 });
+
+test('MuJoCo replay follows recorded bottle and tool poses through physical completion', () => {
+  const physicalMeta = { ...meta, pickBackend: 'mujoco' };
+  const events = [
+    { type: 'pick-action', t: 2360, data: { state: 'holding' } },
+    { type: 'pick-physics', t: 2360, data: { stage: 'lift', cup: [2600, 332, 66],
+      bottle: [2610, 335, 33], bottleQuat: [1, 0, 0, 0], beltMm: 2360 } },
+    { type: 'pick-physics', t: 2370, data: { stage: 'lift', cup: [2605, 332, 68],
+      bottle: [2615, 335, 35], bottleQuat: [1, 0, 0, 0], beltMm: 2370 } },
+    { type: 'pick-result', t: 3681, data: { state: 'terminal', outcome: 'picked' } },
+  ];
+  const motion = createPickMotion({ meta: physicalMeta, events });
+  assert.equal(sample(motion, 2360).stage, 'holding');
+  assert.deepEqual(sample(motion, 2365).tool, [2602.5, 332, 67]);
+  assert.deepEqual(sample(motion, 2365).bottle, [2612.5, 335, 67]);
+  assert.equal(sample(motion, 2365).travel, 2365);
+  assert.equal(sample(motion, 3681).stage, 'picked');
+  assert.equal(sample(createPickMotion({ meta: physicalMeta, events: [] }), 2360), null);
+});

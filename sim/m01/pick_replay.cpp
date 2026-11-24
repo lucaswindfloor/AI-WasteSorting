@@ -1,4 +1,5 @@
 #include "pick_replay.h"
+#include "mujoco_worker.h"
 
 #include "m04_tracking/tracking_service.h"
 #include "m06_scheduling/scheduling_service.h"
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 
 namespace waste::m01sim {
@@ -18,6 +20,7 @@ using m04::Point;
 using m07::EventKind;
 
 constexpr Tick horizon = 3200ms;
+constexpr Tick physics_horizon = 6000ms;
 constexpr double depth_pitch_x = pet_depth_period.count(); // 1 m/s in the single-bottle scenarios.
 constexpr double cup_radius_mm = 7.5;
 const m05::ToolIdentity cup{"sim-arm", "sim-cup", "sim-tool-v1", "sim-tcp-v1"};
@@ -36,6 +39,11 @@ std::string ms(Tick time) {
 }
 
 std::string count(long double value) { return std::to_string(value); }
+
+m06::Window effective_contact(const m07::Payload& p, Tick receipt) {
+    return {std::max(p.contact.open + p.early_margin, receipt + p.receive_to_contact_min),
+            std::min(p.contact.close - p.late_margin, receipt + p.receive_to_contact_max)};
+}
 
 Point area_center(const m04::Footprint& f) {
     Point center{};
@@ -102,12 +110,12 @@ m05::Recipe recipe(const m03::Generation& generation, double depth_pitch_y) {
     return result;
 }
 
-m06::SchedulingConfig scheduling(const m03::Generation& g, const Layout& belt) {
+m06::SchedulingConfig scheduling(const m03::Generation& g, const Layout& belt, bool physics) {
     m06::SchedulingConfig result;
     result.generation = g;
     result.version = "sim-schedule-v1";
     result.scheduler_session = "sim-scheduler";
-    result.valid_until = horizon;
+    result.valid_until = physics ? physics_horizon : horizon;
     result.max_prediction_age = 25ms;
     result.transaction_lead = 3ms;
     result.max_tracking_error_mm = 8;
@@ -119,28 +127,34 @@ m06::SchedulingConfig scheduling(const m03::Generation& g, const Layout& belt) {
     result.lanes = {{cup.station, "sim-robot", m06::Contract::B, m06::TrackingMode::ControllerNative,
                      {{"sim-pick-zone", {belt.pick_begin, 0, 0}, {belt.pick_end, belt.width, 100}}},
                      {0ms, 12ms, 85ms, 90ms, 2ms, 4ms}, {0ms, 310ms}, {0ms, 310ms}, {0ms, 310ms}}};
+    if (physics) {
+        auto& lane = result.lanes.front();
+        lane.budget = {0ms, 12ms, 350ms, 800ms, 2ms, 4ms};
+        lane.robot_use = lane.tool_use = lane.bin_use = {0ms, 4s};
+        result.version = "sim-mujoco-schedule-v1";
+    }
     return result;
 }
 
-m07::ExecutionConfig execution_config(const m03::Generation& g) {
+m07::ExecutionConfig execution_config(const m03::Generation& g, Tick expires) {
     return {g, "sim-execution-v1", "sim-execution", "sim-plc", "sim-safety-mirror",
-            horizon, horizon, 300ms, 100ms, 4, 32, 512, 4, 16,
+            expires, expires, 300ms, 100ms, 4, 32, 512, 4, 16,
             {{cup.station, "sim-robot", controller_id.device, std::string(terminal), m06::Contract::B,
               m06::TrackingMode::ControllerNative, 5ms, false}}};
 }
 
-m07::FieldState field(const m03::Generation& g) {
-    const auto calendar = [](m06::ResourceKind kind, std::string name) {
-        return m06::ResourceCalendar{{kind, std::move(name)}, horizon, {{0ns, horizon}}, {}};
+m07::FieldState field(const m03::Generation& g, Tick expires) {
+    const auto calendar = [expires](m06::ResourceKind kind, std::string name) {
+        return m06::ResourceCalendar{{kind, std::move(name)}, expires, {{0ns, expires}}, {}};
     };
     return {{g, 1, "sim-bin-map-v1",
-             {{cup, m05::ToolCondition::Ready, {"sim-e01", 0ns, horizon}}},
-             {{test_bin, 1, m05::BinCondition::Ready, {"sim-plc", 0ns, horizon}}}},
+             {{cup, m05::ToolCondition::Ready, {"sim-e01", 0ns, expires}}},
+             {{test_bin, 1, m05::BinCondition::Ready, {"sim-plc", 0ns, expires}}}},
             {calendar(m06::ResourceKind::Robot, "sim-robot"), calendar(m06::ResourceKind::Tool, cup.tool),
              calendar(m06::ResourceKind::Bin, test_bin.physical_bin)},
-            {{controller_id.device, controller_id.session, 0ns, horizon, true}},
-            {{std::string(terminal), std::string(terminal_session), 0ns, horizon, true}},
-            {"sim-plc", 0ns, horizon, true}, {"sim-safety-mirror", 0ns, horizon, true}, 1, 0ns};
+            {{controller_id.device, controller_id.session, 0ns, expires, true}},
+            {{std::string(terminal), std::string(terminal_session), 0ns, expires, true}},
+            {"sim-plc", 0ns, expires, true}, {"sim-safety-mirror", 0ns, expires, true}, 1, 0ns};
 }
 
 // The synthetic depth profile certifies small cells on the continuous bottle body. Only actual
@@ -193,13 +207,34 @@ public:
     Tick sent{}, contact{};
     std::optional<m07::Command> active;
     Point actual_contact;
+    std::int64_t contact_count{};
+    Tick received{}, home{};
+    bool landed{};
+    std::string physics_result;
+    std::string physics_error;
+    std::unique_ptr<MujocoWorker> physics;
+    const double scale;
+    const PickReplay::Log& log;
 
-    SimController(const Layout& b, const Tick& clock, m09::M07IntentStore& store, bool lose_ack)
-        : belt(b), now(clock), journal(store), uncertain(lose_ack) {}
+    SimController(const Layout& b, const Tick& clock, m09::M07IntentStore& store, bool lose_ack,
+                  const std::string& mode, double mm_per_count, const PickReplay::Log& callback)
+        : belt(b), now(clock), journal(store), uncertain(lose_ack),
+          physics(mode.empty() ? nullptr : std::make_unique<MujocoWorker>(mode)), scale(mm_per_count), log(callback) {}
 
     std::vector<std::byte> encode(const m07::Command& command) override {
-        const auto data = std::to_string(command.request.attempt.sequence) + ":" + point(command.payload.pick) +
-                          ":" + count(command.payload.reference.count);
+        const auto& p = command.payload;
+        std::string data;
+        if (physics) {
+            data = "pick " + std::to_string(command.request.attempt.sequence) + " " +
+                   std::to_string(p.reference.encoder_epoch) + " " + std::to_string(p.pick.x) + " " +
+                   std::to_string(p.pick.y) + " " + std::to_string(p.pick.z) + " " +
+                   count(p.reference.count) + " " + std::to_string(scale) + " " +
+                   ms(p.contact.open + p.early_margin) + " " + ms(p.contact.close - p.late_margin) + " " +
+                   ms(p.receive_to_contact_min) + " " + ms(p.receive_to_contact_max);
+        } else {
+            data = std::to_string(command.request.attempt.sequence) + ":" + point(p.pick) +
+                   ":" + count(p.reference.count);
+        }
         const auto bytes = std::as_bytes(std::span(data));
         return {bytes.begin(), bytes.end()};
     }
@@ -212,10 +247,128 @@ public:
             saved.value->wire != wire || saved.value->progress != m07::Progress::Armed) {
             return m07::Transport::DefinitelyNotSent;
         }
+        if (physics && (c.payload.bin != test_bin || c.payload.tool != cup)) {
+            return m07::Transport::DefinitelyNotSent;
+        }
         active = c;
         sent = now;
+        if (physics) {
+            log(now, "pick-command", "{\"attempt\":" + std::to_string(c.request.attempt.sequence) + "}");
+            if (uncertain) return m07::Transport::Uncertain;
+            try {
+                // The persisted command bytes are unchanged. The simulator's
+                // receipt time is supplied as transport metadata.
+                physics->submit(std::string(reinterpret_cast<const char*>(wire.bytes.data()), wire.bytes.size()) +
+                                " " + ms(now + 5ms) + "\n");
+                return m07::Transport::Submitted;
+            } catch (const std::exception& error) {
+                physics_error = error.what();
+                log(now, "pick-result", "{\"state\":\"physics-error\"}");
+                return m07::Transport::Uncertain;
+            }
+        }
         contact = sent + 91ms; // Receipt at +5 ms, contact 86 ms after receipt.
         return uncertain ? m07::Transport::Uncertain : m07::Transport::Submitted;
+    }
+
+    using Events = std::vector<std::pair<EventKind, bool>>;
+
+    void finish_physics(Events& events) {
+        if (home == 0ns || (physics_result == "picked" && (!released || !landed || !contact_ok))) return;
+        if (physics_result == "picked" || physics_result == "missed_contact_window" ||
+            physics_result == "no_contact" || physics_result == "no_seal" || physics_result == "missed_bin") {
+            events.insert(events.end(), {{EventKind::Finished, false}, {EventKind::ToolEmpty, true},
+                          {EventKind::ToolHealthy, true}, {EventKind::RobotReady, false}});
+        }
+    }
+
+    void pose_frame(std::istringstream& row, Tick at) {
+        std::string stage;
+        double belt_mm;
+        Point tool, bottle;
+        std::array<double, 4> quaternion;
+        int held;
+        if (!(row >> stage >> belt_mm >> tool.x >> tool.y >> tool.z >> bottle.x >> bottle.y >> bottle.z >>
+              quaternion[0] >> quaternion[1] >> quaternion[2] >> quaternion[3] >> held) ||
+            (stage != "waiting" && stage != "approach" && stage != "descend" && stage != "lift" &&
+             stage != "transfer" && stage != "return" && stage != "retract") || (held != 0 && held != 1)) {
+            throw std::runtime_error("invalid MuJoCo pose");
+        }
+        std::string rotation = "[";
+        for (auto value : quaternion) rotation += std::to_string(value) + ",";
+        rotation.back() = ']';
+        log(at, "pick-physics", "{\"stage\":\"" + stage + "\",\"beltMm\":" + std::to_string(belt_mm) +
+            ",\"cup\":" + point(tool) + ",\"bottle\":" + point(bottle) + ",\"bottleQuat\":" + rotation +
+            ",\"held\":" + (held ? "true" : "false") + "}");
+    }
+
+    Events physics_due() {
+        Events events;
+        if (!physics_result.empty() || !physics_error.empty()) return events;
+        try {
+            for (const auto& line : physics->advance(std::chrono::duration_cast<std::chrono::milliseconds>(now).count())) {
+                std::istringstream row(line);
+                std::string record, state;
+                long stamp;
+                if (!(row >> record >> stamp) || stamp < 0 || stamp > 6000 || stamp * 1ms > now) {
+                    throw std::runtime_error("invalid MuJoCo record time");
+                }
+                const auto at = stamp * 1ms;
+                if (record == "frame") {
+                    pose_frame(row, at);
+                    continue;
+                }
+                if (record != "event" || at != now || !(row >> state) || !active || uncertain) {
+                    throw std::runtime_error("invalid MuJoCo event");
+                }
+                if (state == "command_started") {
+                    received = at;
+                    events.insert(events.end(), {{EventKind::Receipt, false}, {EventKind::Admitted, false},
+                                  {EventKind::Approaching, false}});
+                } else if (state == "contact") {
+                    if (!(row >> actual_contact.x >> actual_contact.y >> actual_contact.z >> contact_count)) {
+                        throw std::runtime_error("invalid MuJoCo contact");
+                    }
+                    contact = at;
+                    events.emplace_back(EventKind::MotionObserved, false);
+                } else if (state == "holding") {
+                    const auto window = effective_contact(active->payload, received);
+                    contact_ok = contact >= window.open && at <= window.close;
+                    if (!contact_ok) throw std::runtime_error("MuJoCo contact violated the M06 timing contract");
+                    events.emplace_back(EventKind::Holding, true);
+                } else if (state == "released") {
+                    released = true;
+                    events.insert(events.end(), {{EventKind::PlacementEnded, false}, {EventKind::Released, true}});
+                } else if (state == "pick_failed") {
+                    std::string reason;
+                    if (!(row >> reason) || (reason != "missed_contact_window" && reason != "no_contact" && reason != "no_seal")) {
+                        throw std::runtime_error("invalid MuJoCo fault");
+                    }
+                    log(at, "pick-result", "{\"state\":\"failed\",\"outcome\":\"" + reason + "\"}");
+                    events.emplace_back(EventKind::Returning, false);
+                } else if (state == "home") {
+                    home = at;
+                    log(at, "pick-result", "{\"state\":\"home\"}");
+                } else if (state == "landed_in_bin") {
+                    landed = true;
+                    log(at, "pick-result", "{\"state\":\"landed-in-bin\"}");
+                } else if (state == "result") {
+                    if (!(row >> physics_result) || (physics_result != "picked" && physics_result != "missed_contact_window" &&
+                        physics_result != "no_contact" && physics_result != "no_seal" &&
+                        physics_result != "missed_bin" && physics_result != "motion_timeout")) {
+                        throw std::runtime_error("invalid MuJoCo result");
+                    }
+                    log(at, "pick-result", "{\"state\":\"terminal\",\"outcome\":\"" + physics_result + "\"}");
+                    finish_physics(events);
+                } else if (state != "descend_started") {
+                    throw std::runtime_error("unsupported MuJoCo event");
+                }
+            }
+        } catch (const std::exception& error) {
+            physics_error = error.what();
+            log(now, "pick-result", "{\"state\":\"physics-error\"}");
+        }
+        return events;
     }
 
     m07::QueryReply query(const m07::ControllerIdentity& original, const m07::RequestId& request) override {
@@ -236,7 +389,8 @@ public:
         return true;
     }
 
-    std::vector<std::pair<EventKind, bool>> due(std::int64_t actual_count, double millimeters_per_count) {
+    Events due(std::int64_t actual_count, double millimeters_per_count) {
+        if (physics) return physics_due();
         if (!active || uncertain) return {};
         const auto& p = active->payload;
         if (now == sent + 5ms) return {{EventKind::Receipt, false}, {EventKind::Admitted, false}};
@@ -245,6 +399,7 @@ public:
             const auto displacement = actual_count * millimeters_per_count;
             const auto height = surface_height(belt, x, p.pick.y, displacement);
             actual_contact = {x, p.pick.y, height};
+            contact_count = actual_count;
             contact_ok = now >= p.contact.open && now <= p.contact.close &&
                          x >= belt.pick_begin && x <= belt.pick_end && p.bin == test_bin &&
                          height > 0 && std::abs(height - p.pick.z) <= 2 &&
@@ -267,11 +422,13 @@ std::string_view event_name(EventKind event) {
     switch (event) {
     case EventKind::Receipt: return "receipt";
     case EventKind::Admitted: return "admitted";
+    case EventKind::Approaching: return "approaching";
     case EventKind::MotionObserved: return "contact";
     case EventKind::Holding: return "holding";
     case EventKind::PlacementEnded: return "placement-ended";
     case EventKind::Released: return "released";
     case EventKind::Finished: return "finished";
+    case EventKind::Returning: return "returning";
     case EventKind::ToolEmpty: return "tool-empty";
     case EventKind::ToolHealthy: return "tool-healthy";
     case EventKind::RobotReady: return "robot-ready";
@@ -283,6 +440,7 @@ std::string_view event_name(EventKind event) {
 
 struct PickReplay::Impl final : m06::TargetSource {
     Scenario scenario;
+    std::string physics_case;
     const Layout& belt;
     double pitch_y;
     double expected_center_x;
@@ -304,17 +462,20 @@ struct PickReplay::Impl final : m06::TargetSource {
     std::optional<m05::Reason> last_eligibility;
     std::optional<m06::Reason> last_schedule;
 
-    Impl(Scenario mode, const Layout& layout, unsigned columns, m09::ArchiveService& archive,
+    Impl(Scenario mode, std::string physics, const Layout& layout, unsigned columns, m09::ArchiveService& archive,
          const m02::Snapshot& snapshot, const m03::ModelIdentity& model, Log callback)
-        : scenario(mode), belt(layout), pitch_y(belt.width / columns),
+        : scenario(mode), physics_case(std::move(physics)), belt(layout), pitch_y(belt.width / columns),
           expected_center_x(scene_centroid_x(layout.objects.front())), config(tracking_config(snapshot, model)),
           log(std::move(callback)), journal(archive, cup.station, snapshot.run_id),
-          controller(belt, now, journal, scenario == Scenario::PetReceiptLoss),
+          controller(belt, now, journal, scenario == Scenario::PetReceiptLoss, physics_case,
+                     config.encoder.signed_mm_per_count, log),
           eligibility(recipe(config.generation, pitch_y)),
-          scheduler(scheduling(config.generation, belt), eligibility, [&] { return now; }),
-          execution(execution_config(config.generation), controller, journal, eligibility, *this, [&] { return now; }) {
+          scheduler(scheduling(config.generation, belt, !physics_case.empty()), eligibility, [&] { return now; }),
+          execution(execution_config(config.generation, physics_case.empty() ? horizon : physics_horizon),
+                    controller, journal, eligibility, *this, [&] { return now; }) {
         tracking.activate(config, now);
-        if (!execution.recover() || execution.update_field(field(config.generation)).issue != m07::Issue::None) {
+        if (!execution.recover() ||
+            execution.update_field(field(config.generation, physics_case.empty() ? horizon : physics_horizon)).issue != m07::Issue::None) {
             throw std::runtime_error("single-bottle simulation could not initialize M07");
         }
     }
@@ -421,7 +582,7 @@ struct PickReplay::Impl final : m06::TargetSource {
     }
 
     void advance() {
-        if (now % 10ms == 0ns) schedule();
+        if (now < horizon && now % 10ms == 0ns) schedule();
         for (const auto& report : execution.advance()) {
             if (report.issue == m07::Issue::TransportUncertain && !pending_logged) {
                 pending_logged = true;
@@ -442,10 +603,15 @@ struct PickReplay::Impl final : m06::TargetSource {
                 executed = true;
                 log(now, "pick-position", "{\"valid\":false}");
             }
-            const auto location = kind == EventKind::MotionObserved ?
-                ",\"point\":" + point(controller.actual_contact) +
-                ",\"count\":" + std::to_string(actual_count) : std::string{};
-            log(now, "pick-action", "{\"state\":\"" + std::string(event_name(kind)) + "\"" + location + "}");
+            std::string details;
+            if (kind == EventKind::MotionObserved) {
+                details = ",\"point\":" + point(controller.actual_contact) +
+                          ",\"count\":" + std::to_string(controller.contact_count);
+            } else if (kind == EventKind::Receipt && controller.physics) {
+                const auto window = effective_contact(c.payload, now);
+                details = ",\"contactOpenMs\":" + ms(window.open) + ",\"contactCloseMs\":" + ms(window.close);
+            }
+            log(now, "pick-action", "{\"state\":\"" + std::string(event_name(kind)) + "\"" + details + "}");
             if (kind == EventKind::RobotReady) {
                 const auto snapshot = execution.snapshot();
                 released_resources = execution.status(c.request.attempt) == m06::AttemptStatus::ClosedFinished &&
@@ -454,13 +620,13 @@ struct PickReplay::Impl final : m06::TargetSource {
                 if (released_resources) log(now, "pick-action", "{\"state\":\"resources-released\"}");
             }
         }
-        if (now % 10ms == 0ns) track_position();
+        if (now < horizon && now % 10ms == 0ns) track_position();
     }
 };
 
-PickReplay::PickReplay(Scenario scenario, const Layout& layout, unsigned depth_width, m09::ArchiveService& archive,
+PickReplay::PickReplay(Scenario scenario, std::string mujoco_case, const Layout& layout, unsigned depth_width, m09::ArchiveService& archive,
                        const m02::Snapshot& snapshot, const m03::ModelIdentity& model, Log log)
-    : impl_(std::make_unique<Impl>(scenario, layout, depth_width, archive, snapshot, model, std::move(log))) {}
+    : impl_(std::make_unique<Impl>(scenario, std::move(mujoco_case), layout, depth_width, archive, snapshot, model, std::move(log))) {}
 
 PickReplay::~PickReplay() = default;
 
@@ -498,8 +664,20 @@ void PickReplay::advance(Tick now) {
     if (now < horizon) impl_->advance();
 }
 
+void PickReplay::drain() {
+    auto& p = *impl_;
+    if (p.physics_case.empty() || !p.controller.active || p.controller.uncertain) return;
+    for (auto at = horizon; at < physics_horizon && !p.released_resources; at += 1ms) {
+        p.now = at;
+        p.advance();
+    }
+}
+
 std::string PickReplay::verify() {
     auto& p = *impl_;
+    const auto state = p.execution.state();
+    if (!state || (p.task && !p.journal.publish(state->revision).value)) return "M07 command journal could not be published";
+    if (!p.controller.physics_error.empty()) return "MuJoCo worker: " + p.controller.physics_error;
     if (p.second_target || p.complete_matches < 2 || p.partial_windows == 0) {
         return "single-bottle tracking did not retain one ID across complete and clipped windows (matches=" +
             std::to_string(p.complete_matches) + ", clipped=" + std::to_string(p.partial_windows) + ")";
@@ -520,15 +698,20 @@ std::string PickReplay::verify() {
             return "uncertain send was not retained for query with resources held";
         }
     }
-    if (p.scenario == Scenario::PetPick && (!p.task || p.controller.sends != 1 || !p.controller.contact_ok ||
-        !p.controller.released || !p.released_resources)) {
+    const auto expected = p.physics_case == "slow" ? "missed_contact_window" :
+                          p.physics_case == "offset" ? "no_contact" : "picked";
+    bool valid_pick = p.controller.contact_ok && p.controller.released;
+    if (!p.physics_case.empty()) {
+        valid_pick = p.controller.physics_result == expected &&
+                     (p.physics_case == "normal" ? valid_pick && p.controller.landed
+                                                 : !p.controller.contact_ok && !p.controller.released);
+    }
+    if (p.scenario == Scenario::PetPick && (!p.task || p.controller.sends != 1 || !valid_pick || !p.released_resources)) {
         return "bottle did not complete a verified simulated pick and resource release (sends=" +
-            std::to_string(p.controller.sends) + ", eligibility=" +
+            std::to_string(p.controller.sends) + ", outcome=" + p.controller.physics_result + ", eligibility=" +
             std::to_string(static_cast<int>(p.last_eligibility.value_or(m05::Reason::None))) + ", schedule=" +
             std::to_string(static_cast<int>(p.last_schedule.value_or(m06::Reason::None))) + ")";
     }
-    const auto state = p.execution.state();
-    if (!state || (p.task && !p.journal.publish(state->revision).value)) return "M07 command journal could not be published";
     return {};
 }
 

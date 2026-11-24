@@ -23,6 +23,7 @@ struct Options {
     bool allow_masks{};
     bool production{};
     bool export_bcaf{};
+    std::string mujoco_case;
 };
 
 struct Report {

@@ -59,6 +59,7 @@ Options parse(int argc, char** argv) {
         else if (option == "--hsi-width") out.profile.hsi_width = bounded(value, 16, 640);
         else if (option == "--hsi-bands") out.profile.hsi_bands = bounded(value, 2, 224);
         else if (option == "--packet-lines") out.profile.packet_lines = bounded(value, 1, 8);
+        else if (option == "--mujoco" && (value == "normal" || value == "slow" || value == "offset")) out.mujoco_case = value;
         else if (option == "--depth" && value == "independent") out.depth = DepthMode::Independent;
         else if (option == "--depth" && value == "encoder") out.depth = DepthMode::Encoder;
         else if (option == "--m03") {
@@ -93,6 +94,7 @@ void help() {
                  "        clock-missing|count-interpolation|invalid-white|inference-overload|model-switch\n"
                  "        production uses normal|rgb-frame-loss, RGB/off and 1000..3000 mm/s\n"
                  "        pet-pick|pet-depth-loss|pet-encoder-loss|pet-receipt-loss use production, RGB/strict at 1000 mm/s\n"
+                 "        [--mujoco normal|slow|offset] selects headless MuJoCo for a PET scenario\n"
                  "        [--speed-mm-s 500..3000] [--depth independent|encoder]\n"
                  "        [--m03 off|rgb|hsi|split|joint] [--m03-mask strict|allow]\n"
                  "        [--export-bcaf] export calibrated production RGB+HSI for offline inference\n"

@@ -4,12 +4,18 @@ export function createPickMotion({ meta, events }) {
   const actions = new Map(events.filter((event) => event.type === 'pick-action')
     .map(({ data, t }) => [data.state, { time: t, point: data.point }]));
   const item = meta.objects[0];
+  const physical = meta.pickBackend === 'mujoco';
   const home = [meta.pickBegin + 255, 530, 218];
-  const bin = { x: meta.pickBegin + 205, y: meta.beltWidth + 159, length: 365, width: 225, rim: 78 };
+  const bin = physical
+    ? { x: 2650, y: 970, length: 370, width: 246, rim: 84, floor: -50 }
+    : { x: meta.pickBegin + 205, y: meta.beltWidth + 159, length: 365, width: 225, rim: 78, floor: 0 };
+  const frames = physical ? events.filter((event) => event.type === 'pick-physics') : [];
+  const results = physical ? events.filter((event) => event.type === 'pick-result') : [];
   return {
-    item, home, bin, admitted: actions.get('admitted')?.time, contact: actions.get('contact'),
+    item, home, bin, physical, frames, results, admitted: actions.get('admitted')?.time, contact: actions.get('contact'),
     holding: actions.get('holding')?.time, released: actions.get('released')?.time,
     ready: actions.get('robot-ready')?.time, pending: actions.get('pending')?.time,
+    end: physical ? results.find((event) => event.data.state === 'terminal')?.t : actions.get('robot-ready')?.time,
   };
 }
 
@@ -23,6 +29,7 @@ function interpolate(from, to, ratio) {
 }
 
 export function samplePickMotion(motion, now, travel, contactTravel) {
+  if (motion.physical) return samplePhysics(motion, now);
   const { item, home, bin, admitted, contact, holding, released, ready, pending } = motion;
   const bottle = [item.x + travel, item.y, item.height];
   if (pending !== undefined && now >= pending) {
@@ -77,11 +84,45 @@ export function samplePickMotion(motion, now, travel, contactTravel) {
   return { stage: 'return', tool, bottle: placed };
 }
 
+function samplePhysics(motion, now) {
+  const { frames } = motion;
+  if (!frames.length) return null;
+  let low = 0, high = frames.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (frames[middle].t <= now) low = middle;
+    else high = middle - 1;
+  }
+  const first = frames[low], next = frames[Math.min(low + 1, frames.length - 1)];
+  const ratio = progress(now, first.t, next.t);
+  const lerp = (a, b) => a + (b - a) * ratio;
+  const pose = (key) => first.data[key].map((value, i) => lerp(value, next.data[key][i]));
+  const bottle = pose('bottle');
+  bottle[2] += motion.item.height / 2;
+  // Project the object's local forward axis using the recorded orientation.
+  const [w, x, y, z] = first.data.bottleQuat;
+  const heading = [1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)];
+  const result = motion.results.findLast((event) => event.t <= now);
+  let stage = first.data.stage === 'waiting' ? 'standby' : first.data.stage;
+  if (motion.pending !== undefined && now >= motion.pending) stage = 'pending';
+  else if (motion.holding === now) stage = 'holding';
+  else if (motion.released === now) stage = 'released';
+  else if (result?.data.state === 'physics-error') stage = 'physics-error';
+  else if (result?.data.state === 'terminal') stage = result.data.outcome;
+  else if (result?.data.state === 'home' && motion.released !== undefined) stage = 'waiting-bin';
+  return { stage, tool: pose('cup'), bottle, heading, travel: lerp(first.data.beltMm, next.data.beltMm) };
+}
+
 export const pickMotionLabels = {
   standby: '吸盘待机', approach: '接近抓点', descend: '跟随皮带下降', contact: '接触物料',
   holding: '已接触 · 吸住物料', lift: '抬起物料', transfer: '携瓶移向测试箱',
   lower: '下降到测试箱', released: '释放到测试箱',
   return: '吸盘回位中', ready: '已回位', pending: '发令效果待核 · 动作位置未确认',
+  retract: '未抓住 · 吸盘撤回中', picked: '已回位 · 瓶子在箱内稳定',
+  missed_contact_window: '错过接触窗 · 已撤回', no_contact: '未接触瓶身 · 已撤回',
+  no_seal: '接触后未吸住 · 已撤回', missed_bin: '投放未在箱内确认',
+  motion_timeout: '动作超时', 'waiting-bin': '吸盘已回位 · 等待瓶子在箱内稳定',
+  'physics-error': '物理执行回报中断',
 };
 
 export function drawPickMotion(canvas, meta, motion, pose, travel, drawSprite) {
@@ -136,9 +177,9 @@ export function drawPickMotion(canvas, meta, motion, pose, travel, drawSprite) {
 
   const left = bin.x - bin.length / 2, right = bin.x + bin.length / 2;
   const back = bin.y - bin.width / 2, front = bin.y + bin.width / 2;
-  const rim = bin.rim;
-  face(plane(left, right, back, front, 0), '#37434a', '#b38d50');
-  face([[left, back, 0], [right, back, 0], [right, back, rim], [left, back, rim]], '#5b5344', '#aa8a54');
+  const { rim, floor } = bin;
+  face(plane(left, right, back, front, floor), '#37434a', '#b38d50');
+  face([[left, back, floor], [right, back, floor], [right, back, rim], [left, back, rim]], '#5b5344', '#aa8a54');
 
   const [bx, by, bz] = pose.bottle;
   const cupKnown = pose.stage !== 'pending';
@@ -164,7 +205,8 @@ export function drawPickMotion(canvas, meta, motion, pose, travel, drawSprite) {
     const height = item.height * 0.7 + item.width * 0.11;
     ctx.save();
     ctx.translate(px, py + height * 0.4);
-    ctx.rotate(0.095);
+    const [hx, hy, hz] = pose.heading ?? [1, 0, 0];
+    ctx.rotate(Math.atan2(0.045 * hx + 0.13 * hy - 0.7 * hz, 0.48 * hx + 0.23 * hy));
     if (!drawSprite(ctx, item.material, -width / 2, -height / 2, width, height)) {
       ctx.fillStyle = '#9ac9cd';
       ctx.beginPath();
@@ -175,8 +217,8 @@ export function drawPickMotion(canvas, meta, motion, pose, travel, drawSprite) {
   }
 
   const corner = [right, front, rim];
-  face([[right, back, rim], corner, [right, front, 0], [right, back, 0]], '#5a4830b0', '#aa8a54');
-  face([[left, front, rim], corner, [right, front, 0], [left, front, 0]], '#493b2bb0', '#aa8a54');
+  face([[right, back, rim], corner, [right, front, floor], [right, back, floor]], '#5a4830b0', '#aa8a54');
+  face([[left, front, rim], corner, [right, front, floor], [left, front, floor]], '#493b2bb0', '#aa8a54');
   label('测试箱', [left + 65, front, -37], '#e6bd80');
   if (cupKnown) {
     beam([columnX, ty, railZ + 5], [columnX, ty, railZ - 24], 28, '#dc9c4f');

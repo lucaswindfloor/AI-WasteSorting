@@ -12,7 +12,7 @@ const names = {
 };
 const significant = new Set(['trigger', 'packet', 'result', 'depth', 'm02', 'm02-depth',
   'm03-model', 'm03-window', 'hsi-independent', 'm02-hsi', 'diagnostic', 'archive', 'reconnect', 'seal',
-  'pick-window', 'pick-eligibility', 'pick-task', 'pick-action']);
+  'pick-window', 'pick-eligibility', 'pick-task', 'pick-action', 'pick-result']);
 const calibration = new CalibrationView();
 const inference = new InferenceView(inspectSource);
 const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -45,6 +45,7 @@ let firstCandidate = null;
 let picking = {};
 let pickMotion = null;
 const pickStages = { receipt: '控制器已收件', admitted: '运动已准入', contact: '已接触',
+  approaching: '机械爪接近抓点', returning: '机械爪撤回',
   holding: '末端已持物', 'placement-ended': '投放动作结束', released: '已释放到模拟测试箱',
   finished: '机器人动作结束', 'robot-ready': '机器人已回位', 'resources-released': '资源已归还',
   pending: '发令效果待核，资源保留' };
@@ -130,6 +131,7 @@ function ingest(event) {
   } else if (event.type === 'pick-eligibility') {
     picking.eligibility = data.state;
   } else if (event.type === 'pick-action') {
+    if (data.state === 'receipt' && data.contactCloseMs !== undefined) picking.contactWindow = data;
     if (data.state === 'holding') picking.removed = true;
     if (data.state in pickStages) picking.action = data.state;
   }
@@ -146,7 +148,9 @@ function paintPick(meta) {
     picking.removed ? 'M04 目标已离开皮带' : p ? 'M04 位置失效' : 'M04 等待完整轮廓';
   $('pick-contact').textContent = t ? 'M05 抓点 (' + coordinates(t.point, 3) + ') · 参考计数 ' +
     t.referenceCount + ' · E05 源点 ' + t.sourceSamples + ' 个 · M06 接触窗 ' +
-    t.openMs.toFixed(1) + '–' + t.closeMs.toFixed(1) + ' ms' :
+    t.openMs.toFixed(1) + '–' + t.closeMs.toFixed(1) + ' ms' +
+    (picking.contactWindow ? ' · 执行有效窗 ' + picking.contactWindow.contactOpenMs.toFixed(1) + '–' +
+      picking.contactWindow.contactCloseMs.toFixed(1) + ' ms' : '') :
     picking.eligibility === 'depth-missing' ? 'M05 抓区深度缺测' : 'M05 等待合格抓点';
   $('pick-progress').textContent = picking.action ? 'M07 ' + pickStages[picking.action] :
     p && !p.valid && !picking.removed ? '位置依据失效，停止发令' : t ? 'M07 等待发令' : '';
@@ -234,9 +238,9 @@ function paint() {
     const travel = distanceAt(meta, cursor);
     const contactTravel = pickMotion.contact ? distanceAt(meta, pickMotion.contact.time) : 0;
     const pose = samplePickMotion(pickMotion, cursor, travel, contactTravel);
-    const stage = pickMotionLabels[pose.stage];
+    const stage = pose ? pickMotionLabels[pose.stage] : '没有可回放的物理轨迹';
     if ($('pick-motion-stage').textContent !== stage) $('pick-motion-stage').textContent = stage;
-    drawPickMotion($('pick-motion'), meta, pickMotion, pose, travel, drawSprite);
+    if (pose) drawPickMotion($('pick-motion'), meta, pickMotion, pose, pose.travel ?? travel, drawSprite);
   }
   $('current-pulse').textContent = '触发 ' + (latestTrigger?.trigger ? '#' + latestTrigger.trigger : '—');
   $('time').textContent = cursor.toFixed(1) + ' ms';
@@ -395,7 +399,12 @@ function install(data, { at = 0, autoplay = !motionReduced } = {}) {
   pickMotion = meta.scenario.startsWith('pet-') ? createPickMotion(report) : null;
   $('pick-replay').hidden = !pickMotion;
   $('pick-jump').disabled = !pickMotion?.contact;
-  $('pick-play').disabled = pickMotion?.admitted === undefined || pickMotion?.ready === undefined;
+  $('pick-play').disabled = pickMotion?.admitted === undefined || pickMotion?.end === undefined;
+  $('pick-motion-note').textContent = pickMotion?.physical
+    ? 'MuJoCo 物理回放 · 使用同一轮的吸盘、瓶子位姿和执行时刻。'
+    : '按控制器事件时间回放，事件之间的运动路径为示意。';
+  const canvas = $('pick-motion');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   $('material-al-card').hidden = !meta.objects.some((item) => item.material === 'AL');
   $('ledger-description').textContent = production ? 'RGB 有效行与编码器一一核对' : '使用 M01 的实际配对结果';
   paintStation(meta);
@@ -522,7 +531,7 @@ $('pick-jump').addEventListener('click', () => {
 $('pick-play').addEventListener('click', () => {
   pause();
   seek(pickMotion.admitted);
-  play(0.05, pickMotion.ready);
+  play(pickMotion.physical ? 0.2 : 0.05, pickMotion.end);
 });
 $('step').addEventListener('click', () => {
   pause();
@@ -596,7 +605,9 @@ function changeLayout() {
       select.value = name === 'scenario' ? 'normal' : name === 'speed' ? '1000' : 'rgb';
     }
   };
-  filter('scenario', production ? ['normal', 'rgb-frame-loss', 'pet-pick', 'pet-depth-loss', 'pet-encoder-loss', 'pet-receipt-loss'] : null);
+  filter('scenario', production ? [...form.elements.scenario.options]
+    .filter((option) => option.value.startsWith('pet-') || ['normal', 'rgb-frame-loss'].includes(option.value))
+    .map((option) => option.value) : null);
   const pet = production && form.elements.scenario.value.startsWith('pet-');
   filter('speed', production ? pet ? ['1000'] : ['1000', '2000', '3000'] : null);
   filter('inference', production ? pet ? ['rgb'] : ['rgb', 'off', 'bcaf'] : null);

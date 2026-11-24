@@ -2,7 +2,7 @@
 
 本实验读取现有 `pet-pick` 报告里的 M06 任务，在 MuJoCo 中驱动三轴吸盘。仿真步长为 1 ms。沿用长 5500 mm、宽 800 mm 的皮带、1 m/s 的带速，以及 2400–2900 mm 的抓取区。皮带用一段连续平移的带面近似，吸附用接触时建立的可解除约束近似。机械轴能力、瓶子质量和吸附判定阈值都是首轮试验设定，现场需要用设备数据校准。
 
-现有网页继续用于采集仿真和旧回放，这一阶段从报告文件接入，物理动作在 MuJoCo 窗口中查看。物理事件记录在自己的报告里，接入实时 M07 是后续一阶段。
+项目提供两种运行方式。联调模式由 M07 在仿真时间轴上实际发令，网页直接读取该轮的物理轨迹和回报。离线模式读取已有报告，适合用 MuJoCo 原生窗口单独看碰撞和动作。
 
 ## Trae 在 WSL2 的操作
 
@@ -21,7 +21,41 @@ python -c "import mujoco; print(mujoco.__version__)"
 
 如果系统只提供 Python 3.10，可以按官方说明安装 uv，在同一仓库执行 `uv python install 3.12` 和 `uv venv --python 3.12 --seed .venv-mujoco`，然后执行上面的激活环境、安装依赖、核对版本三步。 [uv 官方安装说明](https://docs.astral.sh/uv/getting-started/installation/)
 
-接着生成一份新的本机采集报告，并跑三组无窗口验证。请在同一个 WSL 终端执行下列命令。每次新建运行目录，方便保存之前的采集数据。
+## M07 与网页联调
+
+在同一个 WSL 终端执行：
+
+```bash
+export M01_SIM_MUJOCO_PYTHON="$(command -v python)"
+make -j4 m01-sim
+make m01-mujoco-test
+```
+
+测试会从新的采集数据跑到 M07 发令、MuJoCo 物理执行和 M09 命令日志。正常组会校验一次发送、接触在窗内、实际吸附、释放、箱内稳定和资源归还。降速和横向偏移组会校验未抓到、撤回以及资源归还。回执不确定组会校验只发送一次、进入待核并保留资源。
+
+停止旧版网页服务后，在同一终端启动新版。浏览器通过网页回放物理轨迹，使用无窗口 MuJoCo。
+
+```bash
+node web/m01_sim/server.mjs
+```
+
+打开 `http://localhost:8081/`，选择「单 PET 瓶 · MuJoCo 抓取」并运行。在「抓取工位近景」试「跳到接触」、慢放和拖动时间轴。跳到接触时，网页时刻应与下载报告里 `pick-action` 的 `contact` 一致。拖到末尾，应看到瓶子在箱内稳定、M07 资源已归还。刷新页面应恢复上次报告和播放位置。三个故障场景也可在同一下拉菜单选择。
+
+需要直接生成一份可保留的联调报告时，可以使用命令行：
+
+```bash
+mujoco_run_dir=$(mktemp -d "$PWD/build/mujoco-live.XXXXXX")
+build/m01_sim --layout production --scenario pet-pick --mujoco normal --output "$mujoco_run_dir/live"
+printf '%s\n' "$mujoco_run_dir/live/report.json"
+```
+
+联调报告的 `pick-task` 是 M06 计划。`pick-command` 是 M07 发送记录，`pick-action` 是 M07 接收后的状态，`pick-result` 是物理执行结果，`pick-physics` 是吸盘、瓶子和皮带坐标采样。网页同时显示 M06 接触窗和收件后按控制器预算收紧的执行有效窗。采集到 3200 ms 结束，执行回报可继续推进。首轮的视觉采集和 E05 深度仍来自原单瓶场景，只有执行和抓取物理切到 MuJoCo。
+
+Trae 验收后回传 `make m01-mujoco-test` 的结果、网页下载的正常组报告和抓取近景截图。异常时附上场景名、网页提示和服务终端错误。
+
+## 用旧报告独立复跑
+
+离线模式适合从故障中单独检查物理行为。每次用新的运行目录保存之前的采集数据。
 
 ```bash
 make -j4 m01-sim
@@ -59,6 +93,6 @@ python -m sim.mujoco.pet_pick \
   --view
 ```
 
-窗口默认以半速播放物理计算，可以看到瓶子随皮带进入、吸盘跟随并下降、抬升、移向料箱、释放和回位。等正常结束后再关闭窗口，提前关闭会记录 `viewer_closed`。WSL2 依赖 WSLg 显示窗口。如果无窗口测试正常、图形窗口打不开，在 Windows PowerShell 中执行 `wsl --update` 和 `wsl --shutdown`，再打开 Ubuntu、激活虚拟环境并重试。 [微软 WSL 图形应用指南](https://learn.microsoft.com/zh-cn/windows/wsl/tutorials/gui-apps)
+窗口默认以半速播放物理计算，可以看到瓶子随皮带进入、吸盘跟随并下降、抬升、移向料箱、释放和回位。等正常结束后再关闭窗口，提前关闭会记录 `viewer_closed`。如果 WSLg 原生窗口启动崩溃，可以只给该命令加上 `LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe`。浏览器联调使用无窗口计算，无需给网页服务设置这两个变量。 [微软 WSL 图形应用指南](https://learn.microsoft.com/zh-cn/windows/wsl/tutorials/gui-apps)
 
 本机验收后，把命令终端上的三条结果、`physics/` 下的 JSON，以及正常抓取的录屏或截图交回。若图形遇到问题，同时保留无窗口结果和完整错误输出。

@@ -16,13 +16,14 @@ class PickReplay {
 public:
     using Log = std::function<void(m01::Tick, std::string_view, std::string)>;
 
-    PickReplay(Scenario scenario, const Layout& layout, unsigned depth_width, m09::ArchiveService& archive,
+    PickReplay(Scenario scenario, std::string mujoco_case, const Layout& layout, unsigned depth_width, m09::ArchiveService& archive,
                const m02::Snapshot& snapshot, const m03::ModelIdentity& model, Log log);
     ~PickReplay();
     void encoder(m01::Tick now, std::int64_t count);
     void surfaces(m01::Tick now, const m02::Result& result);
     void window(m01::Tick now, const m03::Result& result);
     void advance(m01::Tick now);
+    void drain();
     std::string verify();
 
 private:

@@ -131,7 +131,7 @@ M01_SIM_ARCHIVE := $(addprefix $(BUILD_DIR)/m09-obj/src/m09_archive/,archive_ser
 	storage/local_files.o storage/manifest_store.o storage/record_codec.o storage/segment_store.o storage/storage_pressure.o \
 	storage/command_journal.o)
 
-.PHONY: m01-test m01-sim m01-sim-test m01-pick-test
+.PHONY: m01-test m01-sim m01-sim-test m01-pick-test m01-mujoco-test
 m01-test: $(M01_TEST)
 	$(M01_TEST)
 
@@ -142,6 +142,9 @@ m01-sim-test: $(M01_SIM)
 
 m01-pick-test: $(M01_SIM)
 	python3 tests/m01_sim/pick_scenarios.py "$(M01_SIM)"
+
+m01-mujoco-test: $(M01_SIM)
+	python3 tests/m01_sim/pick_mujoco.py "$(M01_SIM)"
 
 $(M01_SIM): $(M01_SIM_OBJECTS) $(M01_SIM_ARCHIVE)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -lcrypto -o $@

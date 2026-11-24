@@ -783,7 +783,7 @@ void Simulation::activate_inference(const Session& session, const m02::Snapshot&
                                            opts_.allow_masks, window_rows_, window_step_, budget_);
         const auto identity = manifest.identity;
         if (pet_pick(opts_.scenario)) {
-            pick_.emplace(opts_.scenario, layout_, opts_.profile.depth_width, archive_, snapshot, identity,
+            pick_.emplace(opts_.scenario, opts_.mujoco_case, layout_, opts_.profile.depth_width, archive_, snapshot, identity,
                           [this](Tick at, std::string_view kind, std::string data) { log(at, kind, std::move(data)); });
         }
         activation.models.push_back(identity.key);
@@ -1158,6 +1158,8 @@ void Simulation::write(const Report& report, std::uint64_t version, std::size_t 
         {"bcafCapture", opts_.export_bcaf ? "1" : "null"},
         {"m03BudgetMs", time(budget_)},
         {"durationMs", time(latest_)}, {"beltWidth", decimal(layout_.width)}, {"scanX", decimal(layout_.rgb_x)},
+        {"pickBackend", quote(opts_.mujoco_case.empty() ? "scripted" : "mujoco")},
+        {"pickCase", quote(opts_.mujoco_case)},
         {"beltLength", decimal(layout_.length)}, {"depthScanX", decimal(layout_.depth_x)},
         {"pickBegin", decimal(layout_.pick_begin)}, {"pickEnd", decimal(layout_.pick_end)},
         {"hsiPitch", decimal(hsi_step_ * layout_.pitch)},
@@ -1232,6 +1234,7 @@ Report Simulation::execute() {
     }
     archive_until(Tick::max());
     if (pick_) {
+        pick_->drain();
         auto problem = pick_->verify();
         if (!problem.empty()) check(false, std::move(problem));
     }
@@ -1278,6 +1281,10 @@ bool pet_pick(Scenario scenario) {
 }
 
 Report run(const Options& options) {
+    if (!options.mujoco_case.empty() && (!pet_pick(options.scenario) ||
+        (options.mujoco_case != "normal" && options.scenario != Scenario::PetPick))) {
+        throw std::invalid_argument("MuJoCo slow/offset require pet-pick; normal supports all single-bottle scenarios");
+    }
     if (options.export_bcaf && (!options.production || options.inference != InferenceMode::Rgb || options.allow_masks)) {
         throw std::invalid_argument("--export-bcaf requires production, --m03 rgb and --m03-mask strict");
     }

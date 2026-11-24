@@ -15,6 +15,12 @@ const runFile = /^\/runs\/([0-9a-f-]{36})\/(report\.json|ledger\.csv|bcaf\/(?:bc
 const bcafRepo = process.env.M01_SIM_BCAF_REPO;
 const bcafCheckpoint = process.env.M01_SIM_BCAF_CHECKPOINT;
 const bcafStats = process.env.M01_SIM_BCAF_HSI_STATS;
+const physicsScenarios = new Map([
+  ['pet-mujoco', ['pet-pick', 'normal']],
+  ['pet-mujoco-slow', ['pet-pick', 'slow']],
+  ['pet-mujoco-offset', ['pet-pick', 'offset']],
+  ['pet-mujoco-receipt-loss', ['pet-receipt-loss', 'normal']],
+]);
 const scenarios = new Set(['normal', 'missing', 'late', 'mixed', 'slow-archive', 'reconnect',
   'transport-delay', 'exposure-delay', 'compensated', 'exposure-limit', 'clock-missing',
   'count-interpolation', 'invalid-white', 'inference-overload', 'model-switch']);
@@ -82,7 +88,8 @@ async function simulate(req, res) {
     inference = layout === 'production' ? 'rgb' : 'joint', masks = 'strict' } = options;
   const production = layout === 'production';
   const bcaf = inference === 'bcaf';
-  const pet = ['pet-pick', 'pet-depth-loss', 'pet-encoder-loss', 'pet-receipt-loss'].includes(scenario);
+  const physics = physicsScenarios.get(scenario);
+  const pet = physics || ['pet-pick', 'pet-depth-loss', 'pet-encoder-loss', 'pet-receipt-loss'].includes(scenario);
   const validLayout = production ?
     (pet ? speed === 1000 && depth === 'independent' && inference === 'rgb' && masks === 'strict' :
       ['normal', 'rgb-frame-loss'].includes(scenario) && ['off', 'rgb', 'bcaf'].includes(inference)) :
@@ -106,10 +113,10 @@ async function simulate(req, res) {
   try {
     await mkdir(output, { recursive: true });
     try {
-      await execute(binary, ['--output', path, '--layout', layout, '--scenario', scenario, '--speed-mm-s', String(speed),
+      await execute(binary, ['--output', path, '--layout', layout, '--scenario', physics?.[0] ?? scenario, '--speed-mm-s', String(speed),
         '--depth', depth, ...deviceArgs, '--m03', bcaf ? 'rgb' : inference, '--m03-mask', masks,
-        ...(bcaf ? ['--export-bcaf'] : [])],
-      { timeout: 120000, maxBuffer: 128 * 1024 });
+        ...(bcaf ? ['--export-bcaf'] : []), ...(physics ? ['--mujoco', physics[1]] : [])],
+      { cwd: repo, timeout: 120000, maxBuffer: 128 * 1024 });
     } catch (error) {
       // Exit 1 includes a completed, failed validation report.
       if (error.code !== 1) throw error;
@@ -133,8 +140,10 @@ async function simulate(req, res) {
     }
     return json(res, 200, { id, report });
   } catch (error) {
-    console.error('M01 simulation error:', error.message);
-    return json(res, 503, { error: '仿真程序无法完成。请确认已运行 make m01-sim，并检查终端输出。' });
+    console.error('M01 simulation error:', error.stderr || error.message);
+    return json(res, 503, { error: physics
+      ? 'MuJoCo 仿真无法运行。请确认已重新编译，并通过 M01_SIM_MUJOCO_PYTHON 指向安装 MuJoCo 的 Python。'
+      : '仿真程序无法完成。请确认已运行 make m01-sim，并检查终端输出。' });
   } finally {
     busy = false;
   }

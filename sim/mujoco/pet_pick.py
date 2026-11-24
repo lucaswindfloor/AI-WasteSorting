@@ -62,9 +62,13 @@ def read_task(path):
 
 
 class PickPhysics:
-    def __init__(self, task, case):
+    def __init__(self, task, case, *, retract_on_miss=False):
         self.task = task
         self.case = case
+        self.retract_on_miss = retract_on_miss
+        self.miss = None
+        self.belt_m_s = task.belt_m_s if task else 1.
+        self.belt_stop_s = task.belt_stop_s if task else 3.2
         self.model = mujoco.MjModel.from_xml_path(str(SCENE))
         self.data = mujoco.MjData(self.model)
         self.axes = [self.model.joint("gantry_" + axis).id for axis in "xyz"]
@@ -81,8 +85,8 @@ class PickPhysics:
         self.bin_floor = self.model.geom("bin_floor").id
         self.bin_wall = self.model.geom("bin_end_wall").id
         self.data.qpos[self.qpos] = HOME
-        self.data.qvel[self.model.jnt_dofadr[self.belt_joint]] = task.belt_m_s
-        self.data.qvel[self.model.joint("bottle_free").dofadr[0]] = task.belt_m_s
+        self.data.qvel[self.model.jnt_dofadr[self.belt_joint]] = self.belt_m_s
+        self.data.qvel[self.model.joint("bottle_free").dofadr[0]] = self.belt_m_s
         self.speed = LIMITS.copy()
         if case == "slow":
             self.speed[2] = 0.08
@@ -104,6 +108,13 @@ class PickPhysics:
     def encoder(self):
         return round(self.belt_position() / self.task.m_per_count)
 
+    def sample(self):
+        return {"time_ms": round(self.data.time * 1000, 4), "stage": self.stage,
+                "belt_m": self.belt_position(), "cup_m": self.data.xpos[self.cup].tolist(),
+                "bottle_m": self.data.xpos[self.bottle].tolist(),
+                "bottle_quat": self.data.xquat[self.bottle].tolist(),
+                "holding": bool(self.data.eq_active[self.seal])}
+
     def event(self, name, **details):
         self.events.append({"event": name, "time_ms": round(self.data.time * 1000, 4), **details})
 
@@ -115,7 +126,7 @@ class PickPhysics:
         return point
 
     def drive(self, position, belt_tracking=False):
-        feedforward = np.array([self.task.belt_m_s if belt_tracking else 0., 0., 0.])
+        feedforward = np.array([self.belt_m_s if belt_tracking else 0., 0., 0.])
         position = np.clip(position, self.model.jnt_range[self.axes, 0],
                            self.model.jnt_range[self.axes, 1])
         desired = np.clip(24 * (position - self.data.qpos[self.qpos]) + feedforward,
@@ -187,24 +198,28 @@ class PickPhysics:
             self.inside_since = None
 
     def step(self):
-        now = self.data.time
+        now = round(self.data.time, 9)
         axis = self.data.qpos[self.qpos]
-        point = self.track_point()
-        self.data.ctrl[self.belt_motor] = self.task.belt_m_s if now < self.task.belt_stop_s else 0.
+        self.data.ctrl[self.belt_motor] = self.belt_m_s if now < self.belt_stop_s else 0.
         target = HOME
         follow = False
-        if self.stage == "waiting" and now >= self.task.handoff_s:
+        if self.stage == "waiting" and self.task and now >= self.task.handoff_s:
             self.stage = "approach"
             self.event("command_started", encoder=self.encoder())
-        if self.stage in ("approach", "descend"):
-            if now > self.task.close_s:
-                self.outcome = ("no_seal" if self.contact_seen else
-                                "no_contact" if self.depth_reached else "missed_contact_window")
+        if self.stage in ("approach", "descend") and now > self.task.close_s:
+            self.miss = ("no_seal" if self.contact_seen else
+                         "no_contact" if self.depth_reached else "missed_contact_window")
+            if not self.retract_on_miss:
+                self.outcome = self.miss
                 return
+            self.event("pick_failed", reason=self.miss)
+            self.stage = "retract"
+        if self.stage in ("approach", "descend"):
+            point = self.track_point()
             follow = 2.30 <= point[0] < 2.90
             target = np.array([point[0], point[1], 0.105])
             aligned = (abs(axis[0] - point[0]) <= 0.015 and abs(axis[1] - point[1]) <= 0.006
-                       and abs(self.data.qvel[self.qvel[0]] - self.task.belt_m_s) < 0.12)
+                       and abs(self.data.qvel[self.qvel[0]] - self.belt_m_s) < 0.12)
             if self.stage == "approach" and aligned and now >= self.task.open_s and 2.4 <= point[0] <= 2.9:
                 self.stage = "descend"
                 self.event("descend_started")
@@ -223,27 +238,29 @@ class PickPhysics:
                 self.data.eq_active[self.seal] = False
                 self.event("released", cup_m=self.data.xpos[self.cup].tolist())
                 self.stage = "return"
-        elif self.stage == "return":
-            self.update_landing()
+        elif self.stage in ("return", "retract"):
+            if self.stage == "return":
+                self.update_landing()
             if (self.home_at is None and np.linalg.norm(axis - HOME) < 0.007
                     and np.linalg.norm(self.data.qvel[self.qvel]) < 0.06):
                 self.home_at = now
                 self.event("home")
-            if self.home_at is not None and self.landed_at is not None and self.inside_since is not None:
-                self.outcome = "picked"
+            if self.home_at is not None:
+                if self.stage == "retract":
+                    self.outcome = self.miss
+                elif self.landed_at is not None and self.inside_since is not None:
+                    self.outcome = "picked"
+            if self.outcome:
                 return
-        if now >= self.task.close_s + 2.5:
+        if self.task and now >= self.task.close_s + (3.0 if self.retract_on_miss else 2.5):
             self.outcome = "missed_bin" if self.stage == "return" else "motion_timeout"
             return
         self.drive(target, belt_tracking=follow)
         mujoco.mj_step(self.model, self.data)
         # Synchronize derived poses and contacts to the integrated state.
         mujoco.mj_forward(self.model, self.data)
-        if round(self.data.time * 1000) % 10 == 0:
-            self.samples.append({"time_ms": round(self.data.time * 1000, 4), "stage": self.stage,
-                                 "encoder": self.encoder(), "cup_m": self.data.xpos[self.cup].tolist(),
-                                 "bottle_m": self.data.xpos[self.bottle].tolist(),
-                                 "holding": bool(self.data.eq_active[self.seal])})
+        if not self.retract_on_miss and round(self.data.time * 1000) % 10 == 0:
+            self.samples.append({**self.sample(), "encoder": self.encoder()})
 
     def run(self, view):
         if view:
